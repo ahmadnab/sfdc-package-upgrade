@@ -1,0 +1,28 @@
+{
+  "upgrades": [
+    {
+      "id": "upgrade-1749408842709-xl975nfsx",
+      "batchId": null,
+      "orgId": "qa1315fto",
+      "orgName": "QA Environment 1315",
+      "packageUrl": "04tKb000000J8s9",
+      "startTime": "2025-06-08T18:54:02.709Z",
+      "endTime": "2025-06-08T18:54:22.609Z",
+      "duration": 20,
+      "status": "failed",
+      "error": "page.goto: Target page, context or browser has been closed\nCall log:\n\u001b[2m  - navigating to \"https://qa1315fto.lightning.force.com/packaging/installPackage.apexp?p0=04tKb000000J8s9\", waiting until \"networkidle\"\u001b[22m\n"
+    },
+    {
+      "id": "upgrade-1749408648762-19ep0xqft",
+      "batchId": null,
+      "orgId": "qa1315fto",
+      "orgName": "QA Environment 1315",
+      "packageUrl": "04tKb000000J8s9",
+      "startTime": "2025-06-08T18:50:48.763Z",
+      "endTime": "2025-06-08T18:51:27.634Z",
+      "duration": 39,
+      "status": "failed",
+      "error": "page.waitForLoadState: Timeout 30000ms exceeded.\n=========================== logs ===========================\n  \"domcontentloaded\" event fired\n  \"commit\" event fired\n  \"domcontentloaded\" event fired\n  \"load\" event fired\n============================================================"
+    }
+  ]
+}

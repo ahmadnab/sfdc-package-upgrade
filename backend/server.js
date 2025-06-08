@@ -295,8 +295,10 @@ async function upgradePackage(org, packageUrl, io, upgradeId, batchId = null) {
     await page.click('#Login');
     
     // Wait for navigation after login
-    await page.waitForLoadState('networkidle');
-    
+    await page.waitForURL(`${org.url}lightning/page/home`, {
+      timeout: 30000
+    });
+
     io.emit('status', { 
       orgId: org.id,
       upgradeId,
