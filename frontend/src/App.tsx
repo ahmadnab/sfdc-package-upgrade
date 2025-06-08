@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { io, Socket } from 'socket.io-client';
+import io, { Socket } from 'socket.io-client';
 
 interface Org {
   id: string;
@@ -62,7 +62,7 @@ const App: React.FC = () => {
   const [batchStatus, setBatchStatus] = useState<BatchStatus | null>(null);
   const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null);
   const [isUpgrading, setIsUpgrading] = useState<boolean>(false);
-  const [socket, setSocket] = useState<Socket | null>(null);
+  const [socket, setSocket] = useState<ReturnType<typeof io> | null>(null);
   const [activeTab, setActiveTab] = useState<TabType>('single');
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [showHistory, setShowHistory] = useState<boolean>(false);
