@@ -1,5 +1,4 @@
-import React, { useState, useEffect } from 'react';
-import io, { Socket } from 'socket.io-client';
+import React, { useState, useEffect, useRef } from 'react';
 
 interface Org {
   id: string;
@@ -9,6 +8,7 @@ interface Org {
 }
 
 interface StatusUpdate {
+  type: 'status';
   orgId: string;
   upgradeId?: string;
   batchId?: string;
@@ -18,6 +18,7 @@ interface StatusUpdate {
 }
 
 interface BatchStatus {
+  type: 'batch-status';
   batchId: string;
   status: 'started' | 'completed';
   totalOrgs?: number;
@@ -27,6 +28,7 @@ interface BatchStatus {
 }
 
 interface BatchProgress {
+  type: 'batch-progress';
   batchId: string;
   orgId?: string;
   orgName?: string;
@@ -62,10 +64,12 @@ const App: React.FC = () => {
   const [batchStatus, setBatchStatus] = useState<BatchStatus | null>(null);
   const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null);
   const [isUpgrading, setIsUpgrading] = useState<boolean>(false);
-  const [socket, setSocket] = useState<ReturnType<typeof io> | null>(null);
   const [activeTab, setActiveTab] = useState<TabType>('single');
   const [history, setHistory] = useState<HistoryEntry[]>([]);
-  const [showHistory, setShowHistory] = useState<boolean>(false);
+  const [sessionId] = useState<string>(`session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`);
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const [useSSE, setUseSSE] = useState<boolean>(true);
 
   useEffect(() => {
     // Fetch orgs
@@ -77,39 +81,14 @@ const App: React.FC = () => {
     // Fetch history
     fetchHistory();
 
-    // Setup WebSocket connection
-    const newSocket = io('http://localhost:5001');
-    setSocket(newSocket);
-
-    newSocket.on('status', (data: StatusUpdate) => {
-      setStatus(prev => ({
-        ...prev,
-        [data.orgId]: data
-      }));
-      
-      if (data.status === 'completed' || data.status === 'error') {
-        if (!data.batchId) {
-          setIsUpgrading(false);
-        }
-        // Refresh history when an upgrade completes
-        setTimeout(fetchHistory, 1000);
-      }
-    });
-
-    newSocket.on('batch-status', (data: BatchStatus) => {
-      setBatchStatus(data);
-      if (data.status === 'completed') {
-        setIsUpgrading(false);
-        setBatchProgress(null);
-      }
-    });
-
-    newSocket.on('batch-progress', (data: BatchProgress) => {
-      setBatchProgress(data);
-    });
-
     return () => {
-      newSocket.close();
+      // Cleanup
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current);
+      }
     };
   }, []);
 
@@ -120,6 +99,86 @@ const App: React.FC = () => {
       setHistory(data);
     } catch (error) {
       console.error('Error fetching history:', error);
+    }
+  };
+
+  const startStatusUpdates = () => {
+    // Try SSE first
+    if (useSSE && typeof EventSource !== 'undefined') {
+      try {
+        eventSourceRef.current = new EventSource(`http://localhost:5001/api/status-stream/${sessionId}`);
+        
+        eventSourceRef.current.onmessage = (event) => {
+          const data = JSON.parse(event.data);
+          handleStatusUpdate(data);
+        };
+
+        eventSourceRef.current.onerror = (error) => {
+          console.log('SSE error, falling back to polling');
+          eventSourceRef.current?.close();
+          setUseSSE(false);
+          startPolling();
+        };
+      } catch (error) {
+        console.log('SSE not supported, using polling');
+        setUseSSE(false);
+        startPolling();
+      }
+    } else {
+      startPolling();
+    }
+  };
+
+  const startPolling = () => {
+    // Poll for status updates every second
+    pollingIntervalRef.current = setInterval(async () => {
+      try {
+        const response = await fetch(`http://localhost:5001/api/status/${sessionId}`);
+        const statuses = await response.json();
+        
+        Object.values(statuses).forEach((update: any) => {
+          handleStatusUpdate(update);
+        });
+      } catch (error) {
+        console.error('Polling error:', error);
+      }
+    }, 1000);
+  };
+
+  const stopStatusUpdates = () => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+      pollingIntervalRef.current = null;
+    }
+  };
+
+  const handleStatusUpdate = (data: any) => {
+    if (data.type === 'status') {
+      setStatus(prev => ({
+        ...prev,
+        [data.orgId]: data
+      }));
+      
+      if (data.status === 'completed' || data.status === 'error') {
+        if (!data.batchId) {
+          setIsUpgrading(false);
+          stopStatusUpdates();
+        }
+        setTimeout(fetchHistory, 1000);
+      }
+    } else if (data.type === 'batch-status') {
+      setBatchStatus(data);
+      if (data.status === 'completed') {
+        setIsUpgrading(false);
+        setBatchProgress(null);
+        stopStatusUpdates();
+      }
+    } else if (data.type === 'batch-progress') {
+      setBatchProgress(data);
     }
   };
 
@@ -137,6 +196,7 @@ const App: React.FC = () => {
 
     setIsUpgrading(true);
     setStatus({});
+    startStatusUpdates();
     
     try {
       const response = await fetch('http://localhost:5001/api/upgrade', {
@@ -146,7 +206,8 @@ const App: React.FC = () => {
         },
         body: JSON.stringify({
           orgId: selectedOrg,
-          packageUrl: packageUrl
+          packageUrl: packageUrl,
+          sessionId: sessionId
         }),
       });
 
@@ -156,6 +217,7 @@ const App: React.FC = () => {
     } catch (error) {
       console.error('Error starting upgrade:', error);
       setIsUpgrading(false);
+      stopStatusUpdates();
       alert('Failed to start upgrade process');
     }
   };
@@ -176,6 +238,7 @@ const App: React.FC = () => {
     setStatus({});
     setBatchStatus(null);
     setBatchProgress(null);
+    startStatusUpdates();
     
     try {
       const response = await fetch('http://localhost:5001/api/upgrade-batch', {
@@ -186,7 +249,8 @@ const App: React.FC = () => {
         body: JSON.stringify({
           orgIds: selectedOrgs,
           packageUrl: packageUrl,
-          maxConcurrent: maxConcurrent
+          maxConcurrent: maxConcurrent,
+          sessionId: sessionId
         }),
       });
 
@@ -196,6 +260,7 @@ const App: React.FC = () => {
     } catch (error) {
       console.error('Error starting batch upgrade:', error);
       setIsUpgrading(false);
+      stopStatusUpdates();
       alert('Failed to start batch upgrade process');
     }
   };
@@ -334,26 +399,6 @@ const App: React.FC = () => {
                   />
                 </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Concurrent Upgrades (1-4 recommended)
-                  </label>
-                  <select
-                    value={maxConcurrent}
-                    onChange={(e) => setMaxConcurrent(Number(e.target.value))}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    disabled={isUpgrading}
-                  >
-                    <option value={1}>1 (Sequential)</option>
-                    <option value={2}>2 (Recommended)</option>
-                    <option value={3}>3</option>
-                    <option value={4}>4 (Maximum)</option>
-                  </select>
-                  <p className="text-xs text-gray-500 mt-1">
-                    Higher values speed up processing but use more system resources
-                  </p>
-                </div>
-
                 <button
                   onClick={handleSingleUpgrade}
                   disabled={isUpgrading || !selectedOrg || !packageUrl}
@@ -429,6 +474,26 @@ const App: React.FC = () => {
                     placeholder="04tKb000000J8s9"
                     disabled={isUpgrading}
                   />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Concurrent Upgrades (1-4 recommended)
+                  </label>
+                  <select
+                    value={maxConcurrent}
+                    onChange={(e) => setMaxConcurrent(Number(e.target.value))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    disabled={isUpgrading}
+                  >
+                    <option value={1}>1 (Sequential)</option>
+                    <option value={2}>2 (Recommended)</option>
+                    <option value={3}>3</option>
+                    <option value={4}>4 (Maximum)</option>
+                  </select>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Higher values speed up processing but use more system resources
+                  </p>
                 </div>
 
                 <button
