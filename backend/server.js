@@ -506,7 +506,7 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       }
     } catch (timeoutError) {
       const pageText = await page.textContent('body');
-      if (pageText.toLowerCase().includes('error') || pageText.toLowerCase().includes('failed')) {
+      if (pageText.toLowerCase().includes('failed')) {
         throw new Error('Upgrade failed - error detected on page');
       } else {
         const endTime = new Date();
