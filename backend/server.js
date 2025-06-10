@@ -464,20 +464,25 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
     try {
       await page.waitForFunction(
         () => {
-          const bodyText = document.body.innerText.toLowerCase();
-          return bodyText.includes('successfully') || 
-                 bodyText.includes('completed') || 
-                 bodyText.includes('installed') ||
-                 bodyText.includes('success') ||
-                 bodyText.includes('upgrading') ||
-                 bodyText.includes('upgrading and granting access to admins only...');
+          const bodyText = document.body.innerText;
+          // Normalize whitespace and remove extra dots
+          const normalized = bodyText.replace(/\s+/g, ' ').replace(/\.+/g, '.').trim().toLowerCase();
+          return (
+            normalized.includes('successfully') ||
+            normalized.includes('completed') ||
+            normalized.includes('installed') ||
+            normalized.includes('success') ||
+            normalized.includes('upgrading') ||
+            /upgrading and granting access to admins only\.*\s*$/i.test(normalized)
+          );
         },
         { timeout: 240000 } // 4 minutes (Cloud Run limit is 5 min)
       );
 
       // Check for the specific message and broadcast as completed
       const pageText = await page.textContent('body');
-      if (pageText && pageText.toLowerCase().includes('upgrading and granting access to admins only...')) {
+      const normalizedText = pageText ? pageText.replace(/\s+/g, ' ').replace(/\.+/g, '.').trim().toLowerCase() : '';
+      if (/upgrading and granting access to admins only\.*\s*$/i.test(normalizedText)) {
         const endTime = new Date();
         historyEntry.endTime = endTime.toISOString();
         historyEntry.duration = Math.round((endTime - startTime) / 1000);
@@ -506,9 +511,9 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       }
     } catch (timeoutError) {
       const pageText = await page.textContent('body');
-      const lowerPageText = pageText ? pageText.toLowerCase() : '';
-      // If the special message is present, treat as success regardless of 'error' presence
-      if (lowerPageText.includes('upgrading and granting access to admins only')) {
+      const normalizedText = pageText ? pageText.replace(/\s+/g, ' ').replace(/\.+/g, '.').trim().toLowerCase() : '';
+      // If the special message is present (case-insensitive, ignore dots/case/extra spaces), treat as success regardless of 'error' presence
+      if (/upgrading and granting access to admins only\.*\s*$/i.test(normalizedText)) {
         const endTime = new Date();
         historyEntry.endTime = endTime.toISOString();
         historyEntry.duration = Math.round((endTime - startTime) / 1000);
@@ -521,7 +526,7 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
           status: 'completed',
           message: 'Upgrade process started, wait for confirmation email.'
         });
-      } else if (lowerPageText.includes('error') || lowerPageText.includes('failed')) {
+      } else if (normalizedText.includes('error') || normalizedText.includes('failed')) {
         // Only throw error if the special message is NOT present
         throw new Error('Upgrade failed - error detected on page');
       } else {
