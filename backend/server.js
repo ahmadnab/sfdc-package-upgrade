@@ -469,24 +469,41 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
                  bodyText.includes('completed') || 
                  bodyText.includes('installed') ||
                  bodyText.includes('success') ||
-                 bodyText.includes('upgrading');
+                 bodyText.includes('upgrading') ||
+                 bodyText.includes('upgrading and granting access to admins only...');
         },
         { timeout: 240000 } // 4 minutes (Cloud Run limit is 5 min)
       );
-      
-      const endTime = new Date();
-      historyEntry.endTime = endTime.toISOString();
-      historyEntry.duration = Math.round((endTime - startTime) / 1000);
-      historyEntry.status = 'success';
-      
-      broadcastStatus(sessionId, { 
-        type: 'status',
-        orgId: org.id,
-        upgradeId,
-        batchId,
-        status: 'completed', 
-        message: 'Package upgrade initiated successfully! Wait for completion email.' 
-      });
+
+      // Check for the specific message and broadcast as completed
+      const pageText = await page.textContent('body');
+      if (pageText && pageText.toLowerCase().includes('upgrading and granting access to admins only...')) {
+        const endTime = new Date();
+        historyEntry.endTime = endTime.toISOString();
+        historyEntry.duration = Math.round((endTime - startTime) / 1000);
+        historyEntry.status = 'success';
+        broadcastStatus(sessionId, { 
+          type: 'status',
+          orgId: org.id,
+          upgradeId,
+          batchId,
+          status: 'completed', 
+          message: 'Upgrade process started, wait for confirmation email.' 
+        });
+      } else {
+        const endTime = new Date();
+        historyEntry.endTime = endTime.toISOString();
+        historyEntry.duration = Math.round((endTime - startTime) / 1000);
+        historyEntry.status = 'success';
+        broadcastStatus(sessionId, { 
+          type: 'status',
+          orgId: org.id,
+          upgradeId,
+          batchId,
+          status: 'completed', 
+          message: 'Package upgrade initiated successfully! Wait for completion email.' 
+        });
+      }
     } catch (timeoutError) {
       const pageText = await page.textContent('body');
       if (pageText.toLowerCase().includes('error') || pageText.toLowerCase().includes('failed')) {
