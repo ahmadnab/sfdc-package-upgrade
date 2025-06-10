@@ -426,7 +426,7 @@ const App: React.FC = () => {
                 </div>
               </div>
               {/* Notes Card - right, half width */}
-              <div className="bg-white rounded-lg shadow-md p-6 md:w-1/2 w-full">
+              <div className="bg-white rounded-lg shadow-md p-6 md:w-1/2 w-full md:mb-0 mb-6 self-start">
                 <h2 className="text-xl font-semibold mb-4">Notes</h2>
                 <ul className="list-disc list-inside space-y-1 text-sm text-gray-600">
                   <li>If you received an AWS URL with the mail, make sure it's added to SFDC before you trigger upgrade.</li>
@@ -546,7 +546,7 @@ const App: React.FC = () => {
                 </div>
               </div>
               {/* Notes Card - right, half width */}
-              <div className="bg-white rounded-lg shadow-md p-6 md:w-1/2 w-full">
+              <div className="bg-white rounded-lg shadow-md p-6 md:w-1/2 w-full md:mb-0 mb-6 self-start">
                 <h2 className="text-xl font-semibold mb-4">Notes</h2>
                 <ul className="list-disc list-inside space-y-1 text-sm text-gray-600">
                   <li>If you received an AWS URL with the mail, make sure it's added to SFDC before you trigger upgrade.</li>
