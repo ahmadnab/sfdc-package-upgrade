@@ -393,7 +393,7 @@ const App: React.FC = () => {
                   <input
                     type="text"
                     value={packageUrl}
-                    onChange={(e) => setPackageUrl(e.target.value)}
+                    onChange={(e) => setPackageUrl(e.target.value.trim())}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                     placeholder="04tKb000000J8s9"
                     disabled={isUpgrading}
@@ -470,7 +470,7 @@ const App: React.FC = () => {
                   <input
                     type="text"
                     value={packageUrl}
-                    onChange={(e) => setPackageUrl(e.target.value)}
+                    onChange={(e) => setPackageUrl(e.target.value.trim())}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                     placeholder="04tKb000000J8s9"
                     disabled={isUpgrading}
