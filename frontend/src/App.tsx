@@ -71,9 +71,10 @@ const App: React.FC = () => {
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const [useSSE, setUseSSE] = useState<boolean>(true);
 
+  const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5001';
   useEffect(() => {
     // Fetch orgs
-    fetch('http://localhost:5001/api/orgs')
+    fetch(`${API_URL}/api/orgs`)
       .then(res => res.json())
       .then((data: Org[]) => setOrgs(data))
       .catch(err => console.error('Error fetching orgs:', err));
@@ -94,7 +95,7 @@ const App: React.FC = () => {
 
   const fetchHistory = async () => {
     try {
-      const response = await fetch('http://localhost:5001/api/history');
+      const response = await fetch(`${API_URL}/api/history`);
       const data = await response.json();
       setHistory(data);
     } catch (error) {
@@ -106,8 +107,8 @@ const App: React.FC = () => {
     // Try SSE first
     if (useSSE && typeof EventSource !== 'undefined') {
       try {
-        eventSourceRef.current = new EventSource(`http://localhost:5001/api/status-stream/${sessionId}`);
-        
+        eventSourceRef.current = new EventSource(`${API_URL}/api/status-stream/${sessionId}`);
+
         eventSourceRef.current.onmessage = (event) => {
           const data = JSON.parse(event.data);
           handleStatusUpdate(data);
@@ -133,7 +134,7 @@ const App: React.FC = () => {
     // Poll for status updates every second
     pollingIntervalRef.current = setInterval(async () => {
       try {
-        const response = await fetch(`http://localhost:5001/api/status/${sessionId}`);
+        const response = await fetch(`${API_URL}/api/status/${sessionId}`);
         const statuses = await response.json();
         
         Object.values(statuses).forEach((update: any) => {
@@ -199,7 +200,7 @@ const App: React.FC = () => {
     startStatusUpdates();
     
     try {
-      const response = await fetch('http://localhost:5001/api/upgrade', {
+      const response = await fetch(`${API_URL}/api/upgrade`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -241,7 +242,7 @@ const App: React.FC = () => {
     startStatusUpdates();
     
     try {
-      const response = await fetch('http://localhost:5001/api/upgrade-batch', {
+      const response = await fetch(`${API_URL}/api/upgrade-batch`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

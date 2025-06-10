@@ -1,54 +1,107 @@
 const express = require('express');
 const cors = require('cors');
-const { chromium } = require('playwright-chromium');
+const { chromium } = require('playwright');
 const fs = require('fs').promises;
 const path = require('path');
 
 const app = express();
 
-// CORS configuration - UPDATE with your Vercel URL
+// Get configuration from environment or files
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+const API_KEY = process.env.API_KEY; // Optional API key for security
+
+// CORS configuration
 app.use(cors({
   origin: [
     'http://localhost:3000',
-    'https://salesforce-automation.vercel.app', // UPDATE this with your Vercel URL
-    /https:\/\/.*\.vercel\.app$/ // Allow any Vercel preview URLs
+    FRONTEND_URL,
+    /https:\/\/.*\.vercel\.app$/ // Allow Vercel preview URLs
   ],
   credentials: true
 }));
 
-app.use(express.json());
+app.use(express.json({ limit: '10mb' })); // Increase limit for config data
 
-// File paths
-const ORGS_CONFIG_PATH = 'orgs-config.json';
-const HISTORY_LOG_PATH = 'upgrade-history.json';
+// Optional API Key authentication
+const authenticate = (req, res, next) => {
+  if (!API_KEY) return next(); // Skip if no API key is set
+  
+  const providedKey = req.headers['x-api-key'];
+  if (providedKey === API_KEY) {
+    next();
+  } else {
+    res.status(401).json({ error: 'Invalid API key' });
+  }
+};
+
+// File paths - use /tmp for writable storage in Cloud Run
+const HISTORY_LOG_PATH = '/tmp/upgrade-history.json';
 
 // In-memory status store
 const statusStore = new Map();
 const sseClients = new Map();
 
-// Keep Replit alive endpoint
+// Load org configuration from environment or file
+async function loadOrgConfig() {
+  try {
+    // First try environment variable
+    if (process.env.ORGS_CONFIG) {
+      return JSON.parse(process.env.ORGS_CONFIG);
+    }
+    
+    // Fallback to file (for local development)
+    const data = await fs.readFile('orgs-config.json', 'utf8');
+    return JSON.parse(data);
+  } catch (error) {
+    console.error('Error loading org config:', error);
+    return { orgs: [] };
+  }
+}
+
+// Health check endpoint (required for Cloud Run)
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    memory: process.memoryUsage()
+  });
+});
+
+// Root endpoint
 app.get('/', (req, res) => {
   res.json({ 
-    status: 'running',
-    message: 'Salesforce Automation Backend',
-    endpoints: ['/api/orgs', '/api/upgrade', '/api/upgrade-batch', '/api/history']
+    message: 'Salesforce Automation Backend on Google Cloud Run',
+    endpoints: [
+      '/health',
+      '/api/orgs',
+      '/api/upgrade',
+      '/api/upgrade-batch',
+      '/api/history',
+      '/api/status/:sessionId'
+    ]
   });
 });
 
 // SSE endpoint for real-time updates
-app.get('/api/status-stream/:sessionId', (req, res) => {
+app.get('/api/status-stream/:sessionId', authenticate, (req, res) => {
   const { sessionId } = req.params;
   
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
   
   sseClients.set(sessionId, res);
   
   res.write(`data: ${JSON.stringify({ type: 'connected' })}\n\n`);
   
+  // Send heartbeat every 30 seconds to keep connection alive
+  const heartbeat = setInterval(() => {
+    res.write(`data: ${JSON.stringify({ type: 'heartbeat' })}\n\n`);
+  }, 30000);
+  
   req.on('close', () => {
+    clearInterval(heartbeat);
     sseClients.delete(sessionId);
   });
 });
@@ -63,7 +116,8 @@ function broadcastStatus(sessionId, data) {
   statusStore.set(key, { ...data, timestamp: Date.now() });
 }
 
-app.get('/api/status/:sessionId', (req, res) => {
+// Get status updates (polling fallback)
+app.get('/api/status/:sessionId', authenticate, (req, res) => {
   const { sessionId } = req.params;
   const statuses = {};
   
@@ -77,16 +131,7 @@ app.get('/api/status/:sessionId', (req, res) => {
   res.json(statuses);
 });
 
-async function loadOrgConfig() {
-  try {
-    const data = await fs.readFile(ORGS_CONFIG_PATH, 'utf8');
-    return JSON.parse(data);
-  } catch (error) {
-    console.error('Error loading org config:', error);
-    return { orgs: [] };
-  }
-}
-
+// Load upgrade history
 async function loadHistory() {
   try {
     const data = await fs.readFile(HISTORY_LOG_PATH, 'utf8');
@@ -96,6 +141,7 @@ async function loadHistory() {
   }
 }
 
+// Save upgrade history
 async function saveHistory(history) {
   try {
     await fs.writeFile(HISTORY_LOG_PATH, JSON.stringify(history, null, 2));
@@ -104,6 +150,7 @@ async function saveHistory(history) {
   }
 }
 
+// Add entry to upgrade history
 async function addToHistory(entry) {
   const history = await loadHistory();
   history.upgrades.unshift(entry);
@@ -115,18 +162,19 @@ async function addToHistory(entry) {
   await saveHistory(history);
 }
 
-app.get('/api/orgs', async (req, res) => {
+// API Routes
+app.get('/api/orgs', authenticate, async (req, res) => {
   const config = await loadOrgConfig();
   const orgsWithoutPasswords = config.orgs.map(({ password, ...org }) => org);
   res.json(orgsWithoutPasswords);
 });
 
-app.get('/api/history', async (req, res) => {
+app.get('/api/history', authenticate, async (req, res) => {
   const history = await loadHistory();
   res.json(history.upgrades);
 });
 
-app.post('/api/upgrade', async (req, res) => {
+app.post('/api/upgrade', authenticate, async (req, res) => {
   const { orgId, packageUrl, sessionId } = req.body;
   
   const config = await loadOrgConfig();
@@ -148,8 +196,11 @@ app.post('/api/upgrade', async (req, res) => {
   upgradePackage(org, packageUrl, sessionId, upgradeId).catch(console.error);
 });
 
-app.post('/api/upgrade-batch', async (req, res) => {
-  const { orgIds, packageUrl, maxConcurrent = 2, sessionId } = req.body;
+app.post('/api/upgrade-batch', authenticate, async (req, res) => {
+  const { orgIds, packageUrl, maxConcurrent = 1, sessionId } = req.body;
+  
+  // Limit concurrent to 1 for Cloud Run free tier
+  const limitedConcurrent = Math.min(maxConcurrent, 1);
   
   if (!orgIds || !Array.isArray(orgIds) || orgIds.length === 0) {
     return res.status(400).json({ error: 'No orgs selected for batch upgrade' });
@@ -169,24 +220,22 @@ app.post('/api/upgrade-batch', async (req, res) => {
     batchId,
     sessionId,
     orgsCount: orgsToUpgrade.length,
-    maxConcurrent 
+    maxConcurrent: limitedConcurrent 
   });
   
   // Run in background
-  runBatchUpgradeParallel(orgsToUpgrade, packageUrl, sessionId, batchId, maxConcurrent).catch(console.error);
+  runBatchUpgradeParallel(orgsToUpgrade, packageUrl, sessionId, batchId, limitedConcurrent).catch(console.error);
 });
 
-async function runBatchUpgradeParallel(orgs, packageUrl, sessionId, batchId, maxConcurrent = 2) {
-  // Limit concurrent to 2 on Replit free tier
-  maxConcurrent = Math.min(maxConcurrent, 2);
-  
+// Batch upgrade function
+async function runBatchUpgradeParallel(orgs, packageUrl, sessionId, batchId, maxConcurrent = 1) {
   broadcastStatus(sessionId, {
     type: 'batch-status',
     batchId,
     status: 'started',
     totalOrgs: orgs.length,
     maxConcurrent,
-    message: `Starting batch upgrade for ${orgs.length} orgs (${maxConcurrent} concurrent)`
+    message: `Starting batch upgrade for ${orgs.length} orgs`
   });
   
   let successCount = 0;
@@ -194,7 +243,7 @@ async function runBatchUpgradeParallel(orgs, packageUrl, sessionId, batchId, max
   let completedCount = 0;
   const results = [];
   
-  const processOrg = async (org) => {
+  for (const org of orgs) {
     const upgradeId = `${batchId}-${org.id}`;
     
     try {
@@ -226,15 +275,6 @@ async function runBatchUpgradeParallel(orgs, packageUrl, sessionId, batchId, max
         failureCount
       });
     }
-  };
-  
-  const batches = [];
-  for (let i = 0; i < orgs.length; i += maxConcurrent) {
-    batches.push(orgs.slice(i, i + maxConcurrent));
-  }
-  
-  for (const batch of batches) {
-    await Promise.all(batch.map(org => processOrg(org)));
   }
   
   broadcastStatus(sessionId, {
@@ -249,6 +289,7 @@ async function runBatchUpgradeParallel(orgs, packageUrl, sessionId, batchId, max
   });
 }
 
+// Main upgrade function
 async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = null) {
   let browser;
   let context;
@@ -278,9 +319,9 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       message: 'Launching browser...' 
     });
     
-    // Replit-optimized browser launch
+    // Cloud Run optimized browser launch
     browser = await chromium.launch({
-      headless: true, // Must be true on Replit
+      headless: true,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -288,20 +329,28 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
         '--disable-accelerated-2d-canvas',
         '--no-first-run',
         '--no-zygote',
-        '--single-process', // Important for Replit
+        '--single-process',
         '--disable-gpu',
-        '--disable-blink-features=AutomationControlled'
-      ]
+        '--disable-blink-features=AutomationControlled',
+        '--disable-web-security',
+        '--disable-features=IsolateOrigins,site-per-process',
+        '--disable-site-isolation-trials'
+      ],
+      // Increase timeout for Cloud Run cold starts
+      timeout: 60000
     });
     
     context = await browser.newContext({
       viewport: { width: 1366, height: 768 },
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      // Reduce resource usage
+      javaScriptEnabled: true,
+      ignoreHTTPSErrors: true
     });
     
     page = await context.newPage();
     
-    // Set extra headers to avoid bot detection
+    // Set extra headers
     await page.setExtraHTTPHeaders({
       'Accept-Language': 'en-US,en;q=0.9'
     });
@@ -353,13 +402,10 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
         upgradeId,
         batchId,
         status: 'verification-required', 
-        message: 'Additional verification required. Please complete manually...' 
+        message: 'Additional verification required. Cannot proceed automatically.' 
       });
       
-      await page.waitForNavigation({ 
-        waitUntil: 'networkidle', 
-        timeout: 120000
-      });
+      throw new Error('Manual verification required - automation cannot proceed');
     }
     
     broadcastStatus(sessionId, { 
@@ -383,9 +429,8 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       message: 'Looking for upgrade button...' 
     });
     
+    // Try multiple strategies to find the upgrade button
     let buttonClicked = false;
-    
-    // Try multiple strategies
     const strategies = [
       () => page.click('button[title="Upgrade"]'),
       () => page.getByRole('button', { name: 'Upgrade' }).click(),
@@ -425,7 +470,7 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
                  bodyText.includes('installed') ||
                  bodyText.includes('success');
         },
-        { timeout: 300000 }
+        { timeout: 240000 } // 4 minutes (Cloud Run limit is 5 min)
       );
       
       const endTime = new Date();
@@ -483,22 +528,34 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
   } finally {
     await addToHistory(historyEntry);
     
-    // Clean up with proper error handling
+    // Aggressive cleanup for Cloud Run
     try {
-      if (page) await page.close();
-    } catch (e) {}
+      if (page) {
+        await page.close();
+      }
+    } catch (e) {
+      console.error('Error closing page:', e);
+    }
     
     try {
-      if (context) await context.close();
-    } catch (e) {}
+      if (context) {
+        await context.close();
+      }
+    } catch (e) {
+      console.error('Error closing context:', e);
+    }
     
     try {
-      if (browser) await browser.close();
-    } catch (e) {}
+      if (browser) {
+        await browser.close();
+      }
+    } catch (e) {
+      console.error('Error closing browser:', e);
+    }
   }
 }
 
-// Clean up old statuses periodically
+// Clean up old statuses periodically (every 30 minutes)
 setInterval(() => {
   const oneHourAgo = Date.now() - (60 * 60 * 1000);
   for (const [key, value] of statusStore.entries()) {
@@ -508,8 +565,18 @@ setInterval(() => {
   }
 }, 30 * 60 * 1000);
 
-const PORT = process.env.PORT || 3000; // Replit uses port 3000 by default
-app.listen(PORT, () => {
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM signal received: closing HTTP server');
+  server.close(() => {
+    console.log('HTTP server closed');
+  });
+});
+
+// Start server
+const PORT = process.env.PORT || 8080;
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
-  console.log(`Access at: https://${process.env.REPL_SLUG}.${process.env.REPL_OWNER}.repl.co`);
+  console.log('Cloud Run optimized configuration loaded');
+  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
 });
