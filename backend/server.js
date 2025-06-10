@@ -506,7 +506,9 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       }
     } catch (timeoutError) {
       const pageText = await page.textContent('body');
-      if (pageText && pageText.toLowerCase().includes('upgrading and granting access to admins only')) {
+      const lowerPageText = pageText ? pageText.toLowerCase() : '';
+      // If the special message is present, treat as success regardless of 'error' presence
+      if (lowerPageText.includes('upgrading and granting access to admins only')) {
         const endTime = new Date();
         historyEntry.endTime = endTime.toISOString();
         historyEntry.duration = Math.round((endTime - startTime) / 1000);
@@ -519,7 +521,8 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
           status: 'completed',
           message: 'Upgrade process started, wait for confirmation email.'
         });
-      } else if (pageText && pageText.toLowerCase().includes('error')) {
+      } else if (lowerPageText.includes('error') || lowerPageText.includes('failed')) {
+        // Only throw error if the special message is NOT present
         throw new Error('Upgrade failed - error detected on page');
       } else {
         const endTime = new Date();
