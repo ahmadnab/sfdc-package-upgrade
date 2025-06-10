@@ -443,107 +443,118 @@ const App: React.FC = () => {
         {/* Batch Upgrade Tab */}
         {activeTab === 'batch' && (
           <>
-            <div className="bg-white rounded-lg shadow-md p-6 mb-6">
-              <h2 className="text-xl font-semibold mb-4">Batch Upgrade</h2>
-              
-              <div className="space-y-4">
-                <div>
-                  <div className="flex justify-between items-center mb-2">
-                    <label className="block text-sm font-medium text-gray-700">
-                      Select Organizations ({selectedOrgs.length} selected)
-                    </label>
-                    <div className="space-x-2">
-                      <button
-                        onClick={selectAllOrgs}
-                        className="text-sm text-blue-600 hover:text-blue-800"
-                        disabled={isUpgrading}
-                      >
-                        Select All
-                      </button>
-                      <button
-                        onClick={deselectAllOrgs}
-                        className="text-sm text-blue-600 hover:text-blue-800"
-                        disabled={isUpgrading}
-                      >
-                        Deselect All
-                      </button>
+            <div className="flex flex-col md:flex-row md:space-x-6 mb-6">
+              {/* Batch Upgrade Card - left, half width */}
+              <div className="bg-white rounded-lg shadow-md p-6 mb-6 md:mb-0 md:w-1/2 w-full">
+                <h2 className="text-xl font-semibold mb-4">Batch Upgrade</h2>
+                <div className="space-y-4">
+                  <div>
+                    <div className="flex justify-between items-center mb-2">
+                      <label className="block text-sm font-medium text-gray-700">
+                        Select Organizations ({selectedOrgs.length} selected)
+                      </label>
+                      <div className="space-x-2">
+                        <button
+                          onClick={selectAllOrgs}
+                          className="text-sm text-blue-600 hover:text-blue-800"
+                          disabled={isUpgrading}
+                        >
+                          Select All
+                        </button>
+                        <button
+                          onClick={deselectAllOrgs}
+                          className="text-sm text-blue-600 hover:text-blue-800"
+                          disabled={isUpgrading}
+                        >
+                          Deselect All
+                        </button>
+                      </div>
+                    </div>
+                    <div className="border border-gray-300 rounded-md p-3 max-h-48 overflow-y-auto">
+                      {orgs.map(org => (
+                        <label key={org.id} className="flex items-center p-2 hover:bg-gray-50 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={selectedOrgs.includes(org.id)}
+                            onChange={() => toggleOrgSelection(org.id)}
+                            disabled={isUpgrading}
+                            className="mr-3"
+                          />
+                          <span className="text-sm">
+                            {org.name} ({org.url.replace('https://', '').replace('.lightning.force.com/', '')})
+                          </span>
+                        </label>
+                      ))}
                     </div>
                   </div>
-                  <div className="border border-gray-300 rounded-md p-3 max-h-48 overflow-y-auto">
-                    {orgs.map(org => (
-                      <label key={org.id} className="flex items-center p-2 hover:bg-gray-50 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={selectedOrgs.includes(org.id)}
-                          onChange={() => toggleOrgSelection(org.id)}
-                          disabled={isUpgrading}
-                          className="mr-3"
-                        />
-                        <span className="text-sm">
-                          {org.name} ({org.url.replace('https://', '').replace('.lightning.force.com/', '')})
-                        </span>
-                      </label>
-                    ))}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Package ID (e.g., 04tKb000000J8s9)
+                    </label>
+                    <input
+                      type="text"
+                      value={packageUrl}
+                      maxLength={15}
+                      onChange={(e) => {
+                        const value = e.target.value.trim();
+                        setPackageUrl(value);
+                        if (value.length > 0 && value.length < 15) {
+                          setPackageIdError('Invalid Package ID');
+                        } else {
+                          setPackageIdError('');
+                        }
+                      }}
+                      className={`w-full px-3 py-2 border ${packageIdError ? 'border-red-500' : 'border-gray-300'} rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500`}
+                      placeholder="04tKb000000J8s9"
+                      disabled={isUpgrading}
+                    />
+                    {packageIdError && (
+                      <p className="text-xs text-red-600 mt-1">{packageIdError}</p>
+                    )}
                   </div>
-                </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Concurrent Upgrades (1-4 recommended)
+                    </label>
+                    <select
+                      value={maxConcurrent}
+                      onChange={(e) => setMaxConcurrent(Number(e.target.value))}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      disabled={isUpgrading}
+                    >
+                      <option value={1}>1 (Sequential)</option>
+                      <option value={2}>2 (Recommended)</option>
+                      <option value={3}>3</option>
+                      <option value={4}>4 (Maximum)</option>
+                    </select>
+                    <p className="text-xs text-gray-500 mt-1">
+                      Higher values speed up processing but use more system resources
+                    </p>
+                  </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Package ID (e.g., 04tKb000000J8s9)
-                  </label>
-                  <input
-                    type="text"
-                    value={packageUrl}
-                    maxLength={15}
-                    onChange={(e) => {
-                      const value = e.target.value.trim();
-                      setPackageUrl(value);
-                      if (value.length > 0 && value.length < 15) {
-                        setPackageIdError('Invalid Package ID');
-                      } else {
-                        setPackageIdError('');
-                      }
-                    }}
-                    className={`w-full px-3 py-2 border ${packageIdError ? 'border-red-500' : 'border-gray-300'} rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500`}
-                    placeholder="04tKb000000J8s9"
-                    disabled={isUpgrading}
-                  />
-                  {packageIdError && (
-                    <p className="text-xs text-red-600 mt-1">{packageIdError}</p>
-                  )}
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Concurrent Upgrades (1-4 recommended)
-                  </label>
-                  <select
-                    value={maxConcurrent}
-                    onChange={(e) => setMaxConcurrent(Number(e.target.value))}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    disabled={isUpgrading}
+                  <button
+                    onClick={handleBatchUpgrade}
+                    disabled={isUpgrading || selectedOrgs.length === 0 || !packageUrl}
+                    className={`w-full py-2 px-4 rounded-md font-medium transition-colors ${
+                      isUpgrading || selectedOrgs.length === 0 || !packageUrl
+                        ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                        : 'bg-blue-600 text-white hover:bg-blue-700'
+                    }`}
                   >
-                    <option value={1}>1 (Sequential)</option>
-                    <option value={2}>2 (Recommended)</option>
-                    <option value={3}>3</option>
-                    <option value={4}>4 (Maximum)</option>
-                  </select>
-                  <p className="text-xs text-gray-500 mt-1">
-                    Higher values speed up processing but use more system resources
-                  </p>
+                    {isUpgrading ? `Upgrading ${selectedOrgs.length} orgs...` : `Start Batch Upgrade (${selectedOrgs.length} orgs)`}
+                  </button>
                 </div>
-
-                <button
-                  onClick={handleBatchUpgrade}
-                  disabled={isUpgrading || selectedOrgs.length === 0 || !packageUrl}
-                  className={`w-full py-2 px-4 rounded-md font-medium transition-colors ${
-                    isUpgrading || selectedOrgs.length === 0 || !packageUrl
-                      ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                      : 'bg-blue-600 text-white hover:bg-blue-700'
-                  }`}
-                >
-                  {isUpgrading ? `Upgrading ${selectedOrgs.length} orgs...` : `Start Batch Upgrade (${selectedOrgs.length} orgs)`}
-                </button>
+              </div>
+              {/* Notes Card - right, half width */}
+              <div className="bg-white rounded-lg shadow-md p-6 md:w-1/2 w-full">
+                <h2 className="text-xl font-semibold mb-4">Notes</h2>
+                <ul className="list-disc list-inside space-y-1 text-sm text-gray-600">
+                  <li>If you received an AWS URL with the mail, make sure it's added to SFDC before you trigger upgrade.</li>
+                  <li>Make sure your org credentials are configured in Google Cloud environment variables</li>
+                  <li>Package ID should be the 15-character ID from the Salesforce package URL</li>
+                  <li>Batch upgrades can process multiple orgs in parallel (configurable 1-4)</li>
+                  <li>Higher concurrency speeds up processing but uses more system resources</li>
+                </ul>
               </div>
             </div>
 
