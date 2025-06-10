@@ -465,55 +465,64 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       await page.waitForFunction(
         () => {
           const bodyText = document.body.innerText;
-          // Normalize whitespace and remove extra dots
-          const normalized = bodyText.replace(/\s+/g, ' ').replace(/\.+/g, '.').trim().toLowerCase();
+          // Normalize: remove punctuation, collapse whitespace, lowercase
+          const normalized = bodyText
+            .replace(/[^a-zA-Z0-9 ]/g, '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+          // Regex: ignore whitespace and punctuation
           return (
             normalized.includes('successfully') ||
             normalized.includes('completed') ||
             normalized.includes('installed') ||
             normalized.includes('success') ||
             normalized.includes('upgrading') ||
-            /upgrading and granting access to admins only\.*\s*$/i.test(normalized)
+            /upgrading and granting access to admins only$/i.test(normalized)
           );
         },
-        { timeout: 240000 } // 4 minutes (Cloud Run limit is 5 min)
+        { timeout: 240000 }
       );
 
       // Check for the specific message and broadcast as completed
       const pageText = await page.textContent('body');
-      const normalizedText = pageText ? pageText.replace(/\s+/g, ' ').replace(/\.+/g, '.').trim().toLowerCase() : '';
-      if (/upgrading and granting access to admins only\.*\s*$/i.test(normalizedText)) {
+      const normalizedText = pageText
+        ? pageText.replace(/[^a-zA-Z0-9 ]/g, '').replace(/\s+/g, ' ').trim().toLowerCase()
+        : '';
+      if (/upgrading and granting access to admins only$/i.test(normalizedText)) {
         const endTime = new Date();
         historyEntry.endTime = endTime.toISOString();
         historyEntry.duration = Math.round((endTime - startTime) / 1000);
         historyEntry.status = 'success';
-        broadcastStatus(sessionId, { 
+        broadcastStatus(sessionId, {
           type: 'status',
           orgId: org.id,
           upgradeId,
           batchId,
-          status: 'completed', 
-          message: 'Upgrade process started, wait for confirmation email.' 
+          status: 'completed',
+          message: 'Upgrade process started, wait for confirmation email.'
         });
       } else {
         const endTime = new Date();
         historyEntry.endTime = endTime.toISOString();
         historyEntry.duration = Math.round((endTime - startTime) / 1000);
         historyEntry.status = 'success';
-        broadcastStatus(sessionId, { 
+        broadcastStatus(sessionId, {
           type: 'status',
           orgId: org.id,
           upgradeId,
           batchId,
-          status: 'completed', 
-          message: 'Package upgrade initiated successfully! Wait for completion email.' 
+          status: 'completed',
+          message: 'Package upgrade initiated successfully! Wait for completion email.'
         });
       }
     } catch (timeoutError) {
       const pageText = await page.textContent('body');
-      const normalizedText = pageText ? pageText.replace(/\s+/g, ' ').replace(/\.+/g, '.').trim().toLowerCase() : '';
-      // If the special message is present (case-insensitive, ignore dots/case/extra spaces), treat as success regardless of 'error' presence
-      if (/upgrading and granting access to admins only\.*\s*$/i.test(normalizedText)) {
+      const normalizedText = pageText
+        ? pageText.replace(/[^a-zA-Z0-9 ]/g, '').replace(/\s+/g, ' ').trim().toLowerCase()
+        : '';
+      // If the special message is present (ignore punctuation/whitespace/case), treat as success
+      if (/upgrading and granting access to admins only$/i.test(normalizedText)) {
         const endTime = new Date();
         historyEntry.endTime = endTime.toISOString();
         historyEntry.duration = Math.round((endTime - startTime) / 1000);
