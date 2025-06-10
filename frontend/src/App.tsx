@@ -678,6 +678,7 @@ const App: React.FC = () => {
         <div className="mt-6 text-sm text-gray-600">
           <p className="font-medium mb-2">Notes:</p>
           <ul className="list-disc list-inside space-y-1">
+            <li>If you received any AWS URL in the mail, make sure they're added before you trigger upgrade.</li>
             <li>Make sure your org credentials are configured in Google Cloud environment variables</li>
             <li>If additional verification is required, complete it manually in the browser</li>
             <li>Package ID should be the 15-character ID from the Salesforce package URL</li>
