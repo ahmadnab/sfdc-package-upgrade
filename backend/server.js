@@ -468,7 +468,8 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
           return bodyText.includes('successfully') || 
                  bodyText.includes('completed') || 
                  bodyText.includes('installed') ||
-                 bodyText.includes('success');
+                 bodyText.includes('success') ||
+                 bodyText.includes('upgrading');
         },
         { timeout: 240000 } // 4 minutes (Cloud Run limit is 5 min)
       );
@@ -484,7 +485,7 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
         upgradeId,
         batchId,
         status: 'completed', 
-        message: 'Package upgrade completed successfully!' 
+        message: 'Package upgrade initiated successfully! Wait for completion email.' 
       });
     } catch (timeoutError) {
       const pageText = await page.textContent('body');

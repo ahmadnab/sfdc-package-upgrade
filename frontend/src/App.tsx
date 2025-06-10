@@ -323,7 +323,7 @@ const App: React.FC = () => {
     <div className="min-h-screen bg-gray-100 p-8">
       <div className="max-w-6xl mx-auto">
         <h1 className="text-3xl font-bold text-gray-800 mb-8">
-          Salesforce Package Upgrade Automation
+          Salesforce Package Upgrade Utility
         </h1>
 
         {/* Tab Navigation */}
@@ -650,7 +650,7 @@ const App: React.FC = () => {
         {/* Status Panel - Show for both single and batch */}
         {(activeTab === 'single' || activeTab === 'batch') && (
           <div className="bg-white rounded-lg shadow-md p-6">
-            <h2 className="text-xl font-semibold mb-4">Automation Status</h2>
+            <h2 className="text-xl font-semibold mb-4">Status Log</h2>
             
             {Object.keys(status).length === 0 ? (
               <p className="text-gray-500">No upgrades in progress</p>
@@ -678,8 +678,7 @@ const App: React.FC = () => {
         <div className="mt-6 text-sm text-gray-600">
           <p className="font-medium mb-2">Notes:</p>
           <ul className="list-disc list-inside space-y-1">
-            <li>Make sure your org credentials are configured in orgs-config.json</li>
-            <li>The browser will open to show the automation progress</li>
+            <li>Make sure your org credentials are configured in Google Cloud environment variables</li>
             <li>If additional verification is required, complete it manually in the browser</li>
             <li>Package ID should be the 15-character ID from the Salesforce package URL</li>
             <li>Batch upgrades can process multiple orgs in parallel (configurable 1-4)</li>
