@@ -70,6 +70,7 @@ const App: React.FC = () => {
   const eventSourceRef = useRef<EventSource | null>(null);
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const [useSSE, setUseSSE] = useState<boolean>(true);
+  const [packageIdError, setPackageIdError] = useState<string>("");
 
   const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5001';
   useEffect(() => {
@@ -393,11 +394,23 @@ const App: React.FC = () => {
                   <input
                     type="text"
                     value={packageUrl}
-                    onChange={(e) => setPackageUrl(e.target.value.trim())}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    maxLength={15}
+                    onChange={(e) => {
+                      const value = e.target.value.trim();
+                      setPackageUrl(value);
+                      if (value.length > 0 && value.length < 15) {
+                        setPackageIdError('Invalid Package ID');
+                      } else {
+                        setPackageIdError('');
+                      }
+                    }}
+                    className={`w-full px-3 py-2 border ${packageIdError ? 'border-red-500' : 'border-gray-300'} rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500`}
                     placeholder="04tKb000000J8s9"
                     disabled={isUpgrading}
                   />
+                  {packageIdError && (
+                    <p className="text-xs text-red-600 mt-1">{packageIdError}</p>
+                  )}
                 </div>
 
                 <button
@@ -470,11 +483,23 @@ const App: React.FC = () => {
                   <input
                     type="text"
                     value={packageUrl}
-                    onChange={(e) => setPackageUrl(e.target.value.trim())}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    maxLength={15}
+                    onChange={(e) => {
+                      const value = e.target.value.trim();
+                      setPackageUrl(value);
+                      if (value.length > 0 && value.length < 15) {
+                        setPackageIdError('Invalid Package ID');
+                      } else {
+                        setPackageIdError('');
+                      }
+                    }}
+                    className={`w-full px-3 py-2 border ${packageIdError ? 'border-red-500' : 'border-gray-300'} rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500`}
                     placeholder="04tKb000000J8s9"
                     disabled={isUpgrading}
                   />
+                  {packageIdError && (
+                    <p className="text-xs text-red-600 mt-1">{packageIdError}</p>
+                  )}
                 </div>
 
                 <div>
