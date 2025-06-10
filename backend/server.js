@@ -506,21 +506,33 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       }
     } catch (timeoutError) {
       const pageText = await page.textContent('body');
-      if (pageText.toLowerCase().includes('error')) {
+      if (pageText && pageText.toLowerCase().includes('upgrading and granting access to admins only')) {
+        const endTime = new Date();
+        historyEntry.endTime = endTime.toISOString();
+        historyEntry.duration = Math.round((endTime - startTime) / 1000);
+        historyEntry.status = 'success';
+        broadcastStatus(sessionId, {
+          type: 'status',
+          orgId: org.id,
+          upgradeId,
+          batchId,
+          status: 'completed',
+          message: 'Upgrade process started, wait for confirmation email.'
+        });
+      } else if (pageText && pageText.toLowerCase().includes('error')) {
         throw new Error('Upgrade failed - error detected on page');
       } else {
         const endTime = new Date();
         historyEntry.endTime = endTime.toISOString();
         historyEntry.duration = Math.round((endTime - startTime) / 1000);
         historyEntry.status = 'timeout';
-        
-        broadcastStatus(sessionId, { 
+        broadcastStatus(sessionId, {
           type: 'status',
           orgId: org.id,
           upgradeId,
           batchId,
-          status: 'completed', 
-          message: 'Upgrade process finished (timeout reached, please verify manually)' 
+          status: 'completed',
+          message: 'Upgrade process finished (timeout reached, please verify manually)'
         });
       }
     }
