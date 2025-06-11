@@ -72,14 +72,14 @@ const useApiCall = () => {
   ): Promise<any> => {
     setError(null);
     
-    const headers: HeadersInit = {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    };
-    
-    if (API_KEY) {
-      headers['x-api-key'] = API_KEY;
-    }
+    const headers: Record<string, string> = {
+  'Content-Type': 'application/json',
+        ...(options.headers as Record<string, string> || {}),
+      };
+
+      if (API_KEY) {
+        headers['x-api-key'] = API_KEY;
+      }
 
     try {
       const response = await fetch(url, {
