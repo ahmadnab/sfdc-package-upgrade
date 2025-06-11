@@ -14,7 +14,7 @@ const PAGE_LOAD_TIMEOUT = 30000; // 30 seconds
 const VERIFICATION_TIMEOUT = 120000; // 2 minutes for manual verification
 const CLEANUP_INTERVAL = 30 * 60 * 1000; // 30 minutes
 const MAX_HISTORY_ENTRIES = 100;
-const MAX_REQUEST_SIZE = '10mb';
+const MAX_REQUEST_SIZE = '50mb'; // Increased for screenshots
 
 // Global browser pool for resource management
 const browserPool = new Map();
@@ -596,6 +596,7 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
   let page;
   const startTime = new Date();
   let retryCount = 0;
+  let failureScreenshot = null;
   
   const historyEntry = {
     id: upgradeId,
@@ -608,7 +609,8 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
     duration: null,
     status: 'in-progress',
     error: null,
-    retries: 0
+    retries: 0,
+    screenshot: null
   };
   
   async function attemptUpgrade() {
@@ -789,9 +791,16 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       if (!buttonClicked) {
         // Take screenshot for debugging
         try {
-          const screenshot = await page.screenshot({ encoding: 'base64' });
-          console.log('Page screenshot taken for debugging');
-        } catch (e) {}
+          const screenshot = await page.screenshot({ 
+            encoding: 'base64',
+            fullPage: true,
+            type: 'png'
+          });
+          failureScreenshot = `data:image/png;base64,${screenshot}`;
+          console.log('Page screenshot captured for debugging');
+        } catch (e) {
+          console.error('Failed to capture screenshot:', e.message);
+        }
         
         throw new Error('Upgrade button not found after trying all strategies');
       }
@@ -842,6 +851,18 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
                  pageTextLower.includes('cannot') ||
                  pageTextLower.includes('unable')) {
           
+          // Capture screenshot of error state
+          try {
+            const screenshot = await page.screenshot({ 
+              encoding: 'base64',
+              fullPage: true,
+              type: 'png'
+            });
+            failureScreenshot = `data:image/png;base64,${screenshot}`;
+          } catch (e) {
+            console.error('Failed to capture error screenshot:', e.message);
+          }
+          
           // Extract error message if possible
           const errorMatch = pageText.match(/error[:\s]+([^.]+)/i);
           const errorMessage = errorMatch ? errorMatch[1].trim() : 'Unknown error on page';
@@ -880,6 +901,20 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       }
       
     } catch (error) {
+      // Capture screenshot on any error
+      if (page && !failureScreenshot) {
+        try {
+          const screenshot = await page.screenshot({ 
+            encoding: 'base64',
+            fullPage: true,
+            type: 'png'
+          });
+          failureScreenshot = `data:image/png;base64,${screenshot}`;
+        } catch (e) {
+          console.error('Failed to capture error screenshot:', e.message);
+        }
+      }
+      
       // Retry logic for specific errors
       if (retryCount < config.max_retries && 
           (error.message.includes('net::') || 
@@ -907,6 +942,7 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       historyEntry.status = 'failed';
       historyEntry.error = error.message || 'Unknown error occurred';
       historyEntry.retries = retryCount;
+      historyEntry.screenshot = failureScreenshot;
       
       console.error(`Upgrade error for ${org.name}:`, error.message);
       
@@ -916,7 +952,8 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
         upgradeId,
         batchId,
         status: 'error', 
-        message: `Error: ${error.message}` 
+        message: `Error: ${error.message}`,
+        screenshot: failureScreenshot
       });
       
       throw error;

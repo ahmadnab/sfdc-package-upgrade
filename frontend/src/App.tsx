@@ -21,6 +21,7 @@ interface StatusUpdate {
   status: 'starting' | 'navigating' | 'logging-in' | 'logged-in' | 'verification-required' | 
           'navigating-package' | 'finding-upgrade-button' | 'upgrading' | 'completed' | 'error';
   message: string;
+  screenshot?: string;
 }
 
 interface BatchStatus {
@@ -56,6 +57,7 @@ interface HistoryEntry {
   duration: number | null;
   status: 'in-progress' | 'success' | 'failed' | 'timeout';
   error: string | null;
+  screenshot?: string | null;
 }
 
 type TabType = 'single' | 'batch' | 'history';
@@ -73,13 +75,13 @@ const useApiCall = () => {
     setError(null);
     
     const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        ...(options.headers as Record<string, string> || {}),
-      };
+      'Content-Type': 'application/json',
+      ...(options.headers as Record<string, string> || {}),
+    };
 
-      if (API_KEY) {
-        headers['x-api-key'] = API_KEY;
-      }
+    if (API_KEY) {
+      headers['x-api-key'] = API_KEY;
+    }
 
     try {
       const response = await fetch(url, {
@@ -129,12 +131,42 @@ const App: React.FC = () => {
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const { callApi, loading, error: apiError, setLoading, setError: setApiError } = useApiCall();
 
+  const [showScreenshot, setShowScreenshot] = useState<string | null>(null);
+
   // Fetch orgs on mount
   useEffect(() => {
     fetchOrgs();
     fetchHistory();
   }, []);
 
+  // Screenshot Modal Component
+  const ScreenshotModal = ({ screenshot, onClose }: { screenshot: string; onClose: () => void }) => (
+    <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-lg max-w-6xl max-h-[90vh] overflow-hidden" onClick={(e) => e.stopPropagation()}>
+        <div className="flex justify-between items-center p-4 border-b">
+          <h3 className="text-lg font-semibold">Error Screenshot</h3>
+          <button
+            onClick={onClose}
+            className="text-gray-500 hover:text-gray-700 text-2xl leading-none"
+          >
+            ×
+          </button>
+        </div>
+        <div className="p-4 overflow-auto">
+          <img src={screenshot} alt="Error screenshot" className="max-w-full h-auto" />
+        </div>
+        <div className="p-4 border-t">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+  
   // Cleanup on unmount
   useEffect(() => {
     return () => {
@@ -811,9 +843,19 @@ const App: React.FC = () => {
                             {getStatusIcon(entry.status)} {entry.status}
                           </span>
                           {entry.error && (
-                            <p className="text-xs text-red-600 mt-1" title={entry.error}>
-                              {entry.error.substring(0, 50)}...
-                            </p>
+                            <div>
+                              <p className="text-xs text-red-600 mt-1" title={entry.error}>
+                                {entry.error.substring(0, 50)}...
+                              </p>
+                              {entry.screenshot && (
+                                <button
+                                  onClick={() => setShowScreenshot(entry.screenshot!)}
+                                  className="text-xs text-blue-600 hover:text-blue-800 underline mt-1"
+                                >
+                                  View Screenshot
+                                </button>
+                              )}
+                            </div>
                           )}
                         </td>
                         <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500">
@@ -853,6 +895,14 @@ const App: React.FC = () => {
                           ⚠️ Manual action required: Please complete verification in the browser window
                         </p>
                       )}
+                      {orgStatus.status === 'error' && orgStatus.screenshot && (
+                        <button
+                          onClick={() => setShowScreenshot(orgStatus.screenshot!)}
+                          className="mt-2 text-xs text-blue-600 hover:text-blue-800 underline"
+                        >
+                          View Screenshot
+                        </button>
+                      )}
                     </div>
                   );
                 })}
@@ -867,6 +917,14 @@ const App: React.FC = () => {
               <strong>Connected to:</strong> {API_URL}
             </p>
           </div>
+        )}
+
+        {/* Screenshot Modal */}
+        {showScreenshot && (
+          <ScreenshotModal 
+            screenshot={showScreenshot} 
+            onClose={() => setShowScreenshot(null)} 
+          />
         )}
       </div>
     </div>
