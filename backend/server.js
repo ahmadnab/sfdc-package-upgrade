@@ -209,10 +209,30 @@ function broadcastStatus(sessionId, data) {
     // Add timestamp
     data.timestamp = Date.now();
     
-    // Send to SSE clients
+    // Log screenshot status
+    if (data.screenshot) {
+      console.log(`Broadcasting status with screenshot for ${data.orgId}, size: ${data.screenshot.length}`);
+    }
+    
+    // Send to SSE clients - might need to chunk large screenshots
     const client = sseClients.get(sessionId);
     if (client && client.readyState === 1) {
-      client.write(`data: ${JSON.stringify(data)}\n\n`);
+      // For very large screenshots, consider sending a separate event
+      if (data.screenshot && data.screenshot.length > 100000) {
+        // Send status without screenshot first
+        const statusWithoutScreenshot = { ...data };
+        delete statusWithoutScreenshot.screenshot;
+        client.write(`data: ${JSON.stringify(statusWithoutScreenshot)}\n\n`);
+        
+        // Then send screenshot separately
+        client.write(`data: ${JSON.stringify({ 
+          type: 'screenshot',
+          orgId: data.orgId,
+          screenshot: data.screenshot 
+        })}\n\n`);
+      } else {
+        client.write(`data: ${JSON.stringify(data)}\n\n`);
+      }
     }
     
     // Store for polling with memory management
@@ -793,11 +813,12 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
         try {
           const screenshot = await page.screenshot({ 
             encoding: 'base64',
-            fullPage: true,
-            type: 'png'
+            fullPage: false, // Changed to viewport only to reduce size
+            type: 'jpeg', // Changed to JPEG for smaller size
+            quality: 80 // Reduce quality for smaller size
           });
-          failureScreenshot = `data:image/png;base64,${screenshot}`;
-          console.log('Page screenshot captured for debugging');
+          failureScreenshot = `data:image/jpeg;base64,${screenshot}`;
+          console.log('Screenshot captured:', screenshot.length, 'bytes');
         } catch (e) {
           console.error('Failed to capture screenshot:', e.message);
         }
@@ -855,10 +876,12 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
           try {
             const screenshot = await page.screenshot({ 
               encoding: 'base64',
-              fullPage: true,
-              type: 'png'
+              fullPage: false, // Viewport only
+              type: 'jpeg',
+              quality: 80
             });
-            failureScreenshot = `data:image/png;base64,${screenshot}`;
+            failureScreenshot = `data:image/jpeg;base64,${screenshot}`;
+            console.log('Error screenshot captured:', screenshot.length, 'bytes');
           } catch (e) {
             console.error('Failed to capture error screenshot:', e.message);
           }
@@ -906,10 +929,12 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
         try {
           const screenshot = await page.screenshot({ 
             encoding: 'base64',
-            fullPage: true,
-            type: 'png'
+            fullPage: false,
+            type: 'jpeg',
+            quality: 80
           });
-          failureScreenshot = `data:image/png;base64,${screenshot}`;
+          failureScreenshot = `data:image/jpeg;base64,${screenshot}`;
+          console.log('Final error screenshot captured:', screenshot.length, 'bytes');
         } catch (e) {
           console.error('Failed to capture error screenshot:', e.message);
         }

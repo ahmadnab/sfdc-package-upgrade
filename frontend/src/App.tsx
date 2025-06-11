@@ -139,34 +139,6 @@ const App: React.FC = () => {
     fetchHistory();
   }, []);
 
-  // Screenshot Modal Component
-  const ScreenshotModal = ({ screenshot, onClose }: { screenshot: string; onClose: () => void }) => (
-    <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="bg-white rounded-lg max-w-6xl max-h-[90vh] overflow-hidden" onClick={(e) => e.stopPropagation()}>
-        <div className="flex justify-between items-center p-4 border-b">
-          <h3 className="text-lg font-semibold">Error Screenshot</h3>
-          <button
-            onClick={onClose}
-            className="text-gray-500 hover:text-gray-700 text-2xl leading-none"
-          >
-            ×
-          </button>
-        </div>
-        <div className="p-4 overflow-auto">
-          <img src={screenshot} alt="Error screenshot" className="max-w-full h-auto" />
-        </div>
-        <div className="p-4 border-t">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
-          >
-            Close
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-  
   // Cleanup on unmount
   useEffect(() => {
     return () => {
@@ -285,7 +257,10 @@ const App: React.FC = () => {
       if (data.type === 'status') {
         setStatus(prev => ({
           ...prev,
-          [data.orgId]: data
+          [data.orgId]: {
+            ...data,
+            screenshot: data.screenshot || prev[data.orgId]?.screenshot
+          }
         }));
         
         if (data.status === 'completed' || data.status === 'error') {
@@ -479,6 +454,34 @@ const App: React.FC = () => {
     
     return null;
   };
+
+  // Screenshot Modal Component - MOVED HERE so it's in the correct scope
+  const ScreenshotModal = ({ screenshot, onClose }: { screenshot: string; onClose: () => void }) => (
+    <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-lg max-w-6xl max-h-[90vh] overflow-hidden" onClick={(e) => e.stopPropagation()}>
+        <div className="flex justify-between items-center p-4 border-b">
+          <h3 className="text-lg font-semibold">Error Screenshot</h3>
+          <button
+            onClick={onClose}
+            className="text-gray-500 hover:text-gray-700 text-2xl leading-none"
+          >
+            ×
+          </button>
+        </div>
+        <div className="p-4 overflow-auto">
+          <img src={screenshot} alt="Error screenshot" className="max-w-full h-auto" />
+        </div>
+        <div className="p-4 border-t">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div className="min-h-screen bg-gray-100 p-8">
@@ -872,7 +875,7 @@ const App: React.FC = () => {
 
         {/* Status Panel - Show for both single and batch */}
         {(activeTab === 'single' || activeTab === 'batch') && (
-          <div className="bg-white rounded-lg shadow-md p-6">
+          <div className="bg-white rounded-lg shadow-md p-6 mt-6">
             <h2 className="text-xl font-semibold mb-4">Automation Status</h2>
             
             {Object.keys(status).length === 0 ? (
@@ -903,6 +906,11 @@ const App: React.FC = () => {
                           View Screenshot
                         </button>
                       )}
+                      {orgStatus.status === 'error' && !orgStatus.screenshot && (
+                        <p className="text-xs text-gray-500 mt-2">
+                          (No screenshot available)
+                        </p>
+                      )}
                     </div>
                   );
                 })}
@@ -921,7 +929,7 @@ const App: React.FC = () => {
 
         {/* Screenshot Modal */}
         {showScreenshot && (
-          <ScreenshotModal 
+          <ScreenshotModal
             screenshot={showScreenshot} 
             onClose={() => setShowScreenshot(null)} 
           />
