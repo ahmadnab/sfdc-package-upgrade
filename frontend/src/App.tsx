@@ -1,4 +1,10 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+
+// Configuration
+const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5001';
+const API_KEY = process.env.REACT_APP_API_KEY || '';
+const MAX_RETRIES = 3;
+const RETRY_DELAY = 1000;
 
 interface Org {
   id: string;
@@ -54,12 +60,62 @@ interface HistoryEntry {
 
 type TabType = 'single' | 'batch' | 'history';
 
+// Custom hook for API calls with retry logic
+const useApiCall = () => {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const callApi = useCallback(async (
+    url: string, 
+    options: RequestInit = {},
+    retries: number = MAX_RETRIES
+  ): Promise<any> => {
+    setError(null);
+    
+    const headers: HeadersInit = {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    };
+    
+    if (API_KEY) {
+      headers['x-api-key'] = API_KEY;
+    }
+
+    try {
+      const response = await fetch(url, {
+        ...options,
+        headers,
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+        throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      return await response.json();
+    } catch (err) {
+      const error = err as Error;
+      
+      // Retry logic for network errors
+      if (retries > 0 && error.message.includes('Failed to fetch')) {
+        console.log(`Retrying API call... (${retries} retries left)`);
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+        return callApi(url, options, retries - 1);
+      }
+      
+      throw error;
+    }
+  }, []);
+
+  return { callApi, loading, error, setLoading, setError };
+};
+
 const App: React.FC = () => {
   const [orgs, setOrgs] = useState<Org[]>([]);
   const [selectedOrg, setSelectedOrg] = useState<string>('');
   const [selectedOrgs, setSelectedOrgs] = useState<string[]>([]);
   const [packageUrl, setPackageUrl] = useState<string>('');
-  const [maxConcurrent, setMaxConcurrent] = useState<number>(2);
+  const [maxConcurrent, setMaxConcurrent] = useState<number>(1);
   const [status, setStatus] = useState<Record<string, StatusUpdate>>({});
   const [batchStatus, setBatchStatus] = useState<BatchStatus | null>(null);
   const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null);
@@ -70,49 +126,69 @@ const App: React.FC = () => {
   const eventSourceRef = useRef<EventSource | null>(null);
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const [useSSE, setUseSSE] = useState<boolean>(true);
-  const [packageIdError, setPackageIdError] = useState<string>("");
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const { callApi, loading, error: apiError, setLoading, setError: setApiError } = useApiCall();
 
-  const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5001';
+  // Fetch orgs on mount
   useEffect(() => {
-    // Fetch orgs
-    fetch(`${API_URL}/api/orgs`)
-      .then(res => res.json())
-      .then((data: Org[]) => setOrgs(data))
-      .catch(err => console.error('Error fetching orgs:', err));
-
-    // Fetch history
+    fetchOrgs();
     fetchHistory();
+  }, []);
 
+  // Cleanup on unmount
+  useEffect(() => {
     return () => {
-      // Cleanup
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-      }
-      if (pollingIntervalRef.current) {
-        clearInterval(pollingIntervalRef.current);
-      }
+      stopStatusUpdates();
     };
   }, []);
 
-  const fetchHistory = async () => {
+  const fetchOrgs = async () => {
     try {
-      const response = await fetch(`${API_URL}/api/history`);
-      const data = await response.json();
-      setHistory(data);
+      setLoading(true);
+      const data = await callApi(`${API_URL}/api/orgs`);
+      setOrgs(data);
+      setConnectionError(null);
     } catch (error) {
-      console.error('Error fetching history:', error);
+      console.error('Error fetching orgs:', error);
+      setConnectionError('Failed to connect to backend. Please check if the server is running.');
+    } finally {
+      setLoading(false);
     }
   };
 
+  const fetchHistory = async () => {
+    try {
+      const data = await callApi(`${API_URL}/api/history`);
+      setHistory(data);
+    } catch (error) {
+      console.error('Error fetching history:', error);
+      // Don't show error for history, it's not critical
+    }
+  };
+
+  const validatePackageId = (packageId: string): boolean => {
+    return packageId.length === 15 && /^04t[a-zA-Z0-9]{12}$/.test(packageId);
+  };
+
   const startStatusUpdates = () => {
-    // Try SSE first
+    setConnectionError(null);
+    
     if (useSSE && typeof EventSource !== 'undefined') {
       try {
-        eventSourceRef.current = new EventSource(`${API_URL}/api/status-stream/${sessionId}`);
-
+        const url = new URL(`${API_URL}/api/status-stream/${sessionId}`);
+        if (API_KEY) {
+          url.searchParams.append('api_key', API_KEY);
+        }
+        
+        eventSourceRef.current = new EventSource(url.toString());
+        
         eventSourceRef.current.onmessage = (event) => {
-          const data = JSON.parse(event.data);
-          handleStatusUpdate(data);
+          try {
+            const data = JSON.parse(event.data);
+            handleStatusUpdate(data);
+          } catch (error) {
+            console.error('Error parsing SSE message:', error);
+          }
         };
 
         eventSourceRef.current.onerror = (error) => {
@@ -120,6 +196,11 @@ const App: React.FC = () => {
           eventSourceRef.current?.close();
           setUseSSE(false);
           startPolling();
+        };
+
+        eventSourceRef.current.onopen = () => {
+          console.log('SSE connection established');
+          setConnectionError(null);
         };
       } catch (error) {
         console.log('SSE not supported, using polling');
@@ -132,17 +213,26 @@ const App: React.FC = () => {
   };
 
   const startPolling = () => {
-    // Poll for status updates every second
+    let errorCount = 0;
+    
     pollingIntervalRef.current = setInterval(async () => {
       try {
-        const response = await fetch(`${API_URL}/api/status/${sessionId}`);
-        const statuses = await response.json();
+        const data = await callApi(`${API_URL}/api/status/${sessionId}`);
         
-        Object.values(statuses).forEach((update: any) => {
+        Object.values(data).forEach((update: any) => {
           handleStatusUpdate(update);
         });
+        
+        errorCount = 0; // Reset error count on success
+        setConnectionError(null);
       } catch (error) {
+        errorCount++;
         console.error('Polling error:', error);
+        
+        if (errorCount > 3) {
+          setConnectionError('Lost connection to server. Please refresh the page.');
+          stopStatusUpdates();
+        }
       }
     }, 1000);
   };
@@ -159,80 +249,93 @@ const App: React.FC = () => {
   };
 
   const handleStatusUpdate = (data: any) => {
-    if (data.type === 'status') {
-      setStatus(prev => ({
-        ...prev,
-        [data.orgId]: data
-      }));
-      
-      if (data.status === 'completed' || data.status === 'error') {
-        if (!data.batchId) {
+    try {
+      if (data.type === 'status') {
+        setStatus(prev => ({
+          ...prev,
+          [data.orgId]: data
+        }));
+        
+        if (data.status === 'completed' || data.status === 'error') {
+          if (!data.batchId) {
+            setIsUpgrading(false);
+            stopStatusUpdates();
+          }
+          setTimeout(fetchHistory, 1000);
+        }
+      } else if (data.type === 'batch-status') {
+        setBatchStatus(data);
+        if (data.status === 'completed') {
           setIsUpgrading(false);
+          setBatchProgress(null);
           stopStatusUpdates();
         }
-        setTimeout(fetchHistory, 1000);
+      } else if (data.type === 'batch-progress') {
+        setBatchProgress(data);
       }
-    } else if (data.type === 'batch-status') {
-      setBatchStatus(data);
-      if (data.status === 'completed') {
-        setIsUpgrading(false);
-        setBatchProgress(null);
-        stopStatusUpdates();
-      }
-    } else if (data.type === 'batch-progress') {
-      setBatchProgress(data);
+    } catch (error) {
+      console.error('Error handling status update:', error);
     }
   };
 
   const handleSingleUpgrade = async (): Promise<void> => {
-    if (!selectedOrg || !packageUrl) {
-      alert('Please select an org and enter a package ID');
+    // Validation
+    if (!selectedOrg) {
+      alert('Please select an organization');
       return;
     }
 
-    // Basic validation for package ID format
-    if (packageUrl.length !== 15 || !packageUrl.match(/^04t[a-zA-Z0-9]{12}$/)) {
+    if (!packageUrl) {
+      alert('Please enter a package ID');
+      return;
+    }
+
+    if (!validatePackageId(packageUrl)) {
       alert('Invalid package ID format. It should be 15 characters starting with "04t" (e.g., 04tKb000000J8s9)');
       return;
     }
 
     setIsUpgrading(true);
     setStatus({});
+    setApiError(null);
     startStatusUpdates();
     
     try {
-      const response = await fetch(`${API_URL}/api/upgrade`, {
+      await callApi(`${API_URL}/api/upgrade`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
         body: JSON.stringify({
           orgId: selectedOrg,
           packageUrl: packageUrl,
           sessionId: sessionId
         }),
       });
-
-      if (!response.ok) {
-        throw new Error('Failed to start upgrade');
-      }
     } catch (error) {
       console.error('Error starting upgrade:', error);
       setIsUpgrading(false);
       stopStatusUpdates();
-      alert('Failed to start upgrade process');
+      alert(`Failed to start upgrade: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   };
 
   const handleBatchUpgrade = async (): Promise<void> => {
-    if (selectedOrgs.length === 0 || !packageUrl) {
-      alert('Please select at least one org and enter a package ID');
+    // Validation
+    if (selectedOrgs.length === 0) {
+      alert('Please select at least one organization');
       return;
     }
 
-    // Basic validation for package ID format
-    if (packageUrl.length !== 15 || !packageUrl.match(/^04t[a-zA-Z0-9]{12}$/)) {
+    if (!packageUrl) {
+      alert('Please enter a package ID');
+      return;
+    }
+
+    if (!validatePackageId(packageUrl)) {
       alert('Invalid package ID format. It should be 15 characters starting with "04t" (e.g., 04tKb000000J8s9)');
+      return;
+    }
+
+    const confirmMessage = `Are you sure you want to upgrade ${selectedOrgs.length} organization(s)? This process cannot be stopped once started.`;
+    if (!window.confirm(confirmMessage)) {
       return;
     }
 
@@ -240,14 +343,12 @@ const App: React.FC = () => {
     setStatus({});
     setBatchStatus(null);
     setBatchProgress(null);
+    setApiError(null);
     startStatusUpdates();
     
     try {
-      const response = await fetch(`${API_URL}/api/upgrade-batch`, {
+      await callApi(`${API_URL}/api/upgrade-batch`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
         body: JSON.stringify({
           orgIds: selectedOrgs,
           packageUrl: packageUrl,
@@ -255,15 +356,11 @@ const App: React.FC = () => {
           sessionId: sessionId
         }),
       });
-
-      if (!response.ok) {
-        throw new Error('Failed to start batch upgrade');
-      }
     } catch (error) {
       console.error('Error starting batch upgrade:', error);
       setIsUpgrading(false);
       stopStatusUpdates();
-      alert('Failed to start batch upgrade process');
+      alert(`Failed to start batch upgrade: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   };
 
@@ -293,6 +390,7 @@ const App: React.FC = () => {
       case 'failed': return 'text-red-600';
       case 'upgrading': return 'text-blue-600';
       case 'timeout': return 'text-orange-600';
+      case 'verification-required': return 'text-purple-600';
       default: return 'text-yellow-600';
     }
   };
@@ -305,6 +403,7 @@ const App: React.FC = () => {
       case 'failed': return '❌';
       case 'upgrading': return '🔄';
       case 'timeout': return '⚠️';
+      case 'verification-required': return '🔐';
       default: return '⏳';
     }
   };
@@ -317,15 +416,47 @@ const App: React.FC = () => {
   };
 
   const formatDate = (dateString: string): string => {
-    return new Date(dateString).toLocaleString();
+    try {
+      return new Date(dateString).toLocaleString();
+    } catch {
+      return dateString;
+    }
+  };
+
+  // Error display component
+  const ErrorAlert = ({ message }: { message: string }) => (
+    <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded relative mb-4">
+      <strong className="font-bold">Error: </strong>
+      <span className="block sm:inline">{message}</span>
+    </div>
+  );
+
+  // Connection status component
+  const ConnectionStatus = () => {
+    if (connectionError) {
+      return <ErrorAlert message={connectionError} />;
+    }
+    
+    if (loading && orgs.length === 0) {
+      return (
+        <div className="bg-blue-50 border border-blue-200 text-blue-700 px-4 py-3 rounded relative mb-4">
+          <span className="block sm:inline">Connecting to backend...</span>
+        </div>
+      );
+    }
+    
+    return null;
   };
 
   return (
     <div className="min-h-screen bg-gray-100 p-8">
       <div className="max-w-6xl mx-auto">
         <h1 className="text-3xl font-bold text-gray-800 mb-8">
-          Salesforce Package Upgrade Utility
+          Salesforce Package Upgrade Automation
         </h1>
+
+        <ConnectionStatus />
+        {apiError && <ErrorAlert message={apiError} />}
 
         {/* Tab Navigation */}
         <div className="flex space-x-1 mb-6">
@@ -364,77 +495,60 @@ const App: React.FC = () => {
         {/* Single Upgrade Tab */}
         {activeTab === 'single' && (
           <>
-            <div className="flex flex-col md:flex-row md:space-x-6 mb-6">
-              {/* Org Card - left, half width */}
-              <div className="bg-white rounded-lg shadow-md p-6 mb-6 md:mb-0 md:w-1/2 w-full">
-                <h2 className="text-xl font-semibold mb-4">Single Org Upgrade</h2>
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Select Organization
-                    </label>
-                    <select
-                      value={selectedOrg}
-                      onChange={(e) => setSelectedOrg(e.target.value)}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      disabled={isUpgrading}
-                    >
-                      <option value="">-- Select an Org --</option>
-                      {orgs.map(org => (
-                        <option key={org.id} value={org.id}>
-                          {org.name} ({org.url.replace('https://', '').replace('.lightning.force.com/', '')})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Package ID (e.g., 04tKb000000J8s9)
-                    </label>
-                    <input
-                      type="text"
-                      value={packageUrl}
-                      maxLength={15}
-                      onChange={(e) => {
-                        const value = e.target.value.trim();
-                        setPackageUrl(value);
-                        if (value.length > 0 && value.length < 15) {
-                          setPackageIdError('Invalid Package ID');
-                        } else {
-                          setPackageIdError('');
-                        }
-                      }}
-                      className={`w-full px-3 py-2 border ${packageIdError ? 'border-red-500' : 'border-gray-300'} rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500`}
-                      placeholder="04tKb000000J8s9"
-                      disabled={isUpgrading}
-                    />
-                    {packageIdError && (
-                      <p className="text-xs text-red-600 mt-1">{packageIdError}</p>
-                    )}
-                  </div>
-                  <button
-                    onClick={handleSingleUpgrade}
-                    disabled={isUpgrading || !selectedOrg || !packageUrl}
-                    className={`w-full py-2 px-4 rounded-md font-medium transition-colors ${
-                      isUpgrading || !selectedOrg || !packageUrl
-                        ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                        : 'bg-blue-600 text-white hover:bg-blue-700'
-                    }`}
+            <div className="bg-white rounded-lg shadow-md p-6 mb-6">
+              <h2 className="text-xl font-semibold mb-4">Single Org Upgrade</h2>
+              
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Select Organization
+                  </label>
+                  <select
+                    value={selectedOrg}
+                    onChange={(e) => setSelectedOrg(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    disabled={isUpgrading || loading}
                   >
-                    {isUpgrading ? 'Upgrading...' : 'Start Upgrade'}
-                  </button>
+                    <option value="">-- Select an Org --</option>
+                    {orgs.map(org => (
+                      <option key={org.id} value={org.id}>
+                        {org.name} ({org.url.replace('https://', '').replace('.lightning.force.com/', '')})
+                      </option>
+                    ))}
+                  </select>
                 </div>
-              </div>
-              {/* Notes Card - right, half width */}
-              <div className="bg-white rounded-lg shadow-md p-6 md:w-1/2 w-full md:mb-0 mb-6 self-start">
-                <h2 className="text-xl font-semibold mb-4">Notes</h2>
-                <ul className="list-disc list-inside space-y-1 text-sm text-gray-600">
-                  <li>If you received an AWS URL with the mail, make sure it's added to SFDC before you trigger upgrade.</li>
-                  <li>Make sure your org credentials are configured in Google Cloud environment variables</li>
-                  <li>Package ID should be the 15-character ID from the Salesforce package URL</li>
-                  <li>Batch upgrades can process multiple orgs in parallel (configurable 1-4)</li>
-                  <li>Higher concurrency speeds up processing but uses more system resources</li>
-                </ul>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Package ID (e.g., 04tKb000000J8s9)
+                  </label>
+                  <input
+                    type="text"
+                    value={packageUrl}
+                    onChange={(e) => setPackageUrl(e.target.value.trim())}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="04tKb000000J8s9"
+                    disabled={isUpgrading}
+                    maxLength={15}
+                  />
+                  {packageUrl && !validatePackageId(packageUrl) && (
+                    <p className="text-red-600 text-sm mt-1">
+                      Invalid format. Package ID must be 15 characters starting with "04t"
+                    </p>
+                  )}
+                </div>
+
+                <button
+                  onClick={handleSingleUpgrade}
+                  disabled={isUpgrading || !selectedOrg || !packageUrl || !validatePackageId(packageUrl) || loading}
+                  className={`w-full py-2 px-4 rounded-md font-medium transition-colors ${
+                    isUpgrading || !selectedOrg || !packageUrl || !validatePackageId(packageUrl) || loading
+                      ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                      : 'bg-blue-600 text-white hover:bg-blue-700'
+                  }`}
+                >
+                  {isUpgrading ? 'Upgrading...' : 'Start Upgrade'}
+                </button>
               </div>
             </div>
           </>
@@ -443,35 +557,37 @@ const App: React.FC = () => {
         {/* Batch Upgrade Tab */}
         {activeTab === 'batch' && (
           <>
-            <div className="flex flex-col md:flex-row md:space-x-6 mb-6">
-              {/* Batch Upgrade Card - left, half width */}
-              <div className="bg-white rounded-lg shadow-md p-6 mb-6 md:mb-0 md:w-1/2 w-full">
-                <h2 className="text-xl font-semibold mb-4">Batch Upgrade</h2>
-                <div className="space-y-4">
-                  <div>
-                    <div className="flex justify-between items-center mb-2">
-                      <label className="block text-sm font-medium text-gray-700">
-                        Select Organizations ({selectedOrgs.length} selected)
-                      </label>
-                      <div className="space-x-2">
-                        <button
-                          onClick={selectAllOrgs}
-                          className="text-sm text-blue-600 hover:text-blue-800"
-                          disabled={isUpgrading}
-                        >
-                          Select All
-                        </button>
-                        <button
-                          onClick={deselectAllOrgs}
-                          className="text-sm text-blue-600 hover:text-blue-800"
-                          disabled={isUpgrading}
-                        >
-                          Deselect All
-                        </button>
-                      </div>
+            <div className="bg-white rounded-lg shadow-md p-6 mb-6">
+              <h2 className="text-xl font-semibold mb-4">Batch Upgrade</h2>
+              
+              <div className="space-y-4">
+                <div>
+                  <div className="flex justify-between items-center mb-2">
+                    <label className="block text-sm font-medium text-gray-700">
+                      Select Organizations ({selectedOrgs.length} selected)
+                    </label>
+                    <div className="space-x-2">
+                      <button
+                        onClick={selectAllOrgs}
+                        className="text-sm text-blue-600 hover:text-blue-800"
+                        disabled={isUpgrading || loading}
+                      >
+                        Select All
+                      </button>
+                      <button
+                        onClick={deselectAllOrgs}
+                        className="text-sm text-blue-600 hover:text-blue-800"
+                        disabled={isUpgrading}
+                      >
+                        Deselect All
+                      </button>
                     </div>
-                    <div className="border border-gray-300 rounded-md p-3 max-h-48 overflow-y-auto">
-                      {orgs.map(org => (
+                  </div>
+                  <div className="border border-gray-300 rounded-md p-3 max-h-48 overflow-y-auto">
+                    {orgs.length === 0 ? (
+                      <p className="text-gray-500 text-center">No organizations available</p>
+                    ) : (
+                      orgs.map(org => (
                         <label key={org.id} className="flex items-center p-2 hover:bg-gray-50 cursor-pointer">
                           <input
                             type="checkbox"
@@ -484,77 +600,60 @@ const App: React.FC = () => {
                             {org.name} ({org.url.replace('https://', '').replace('.lightning.force.com/', '')})
                           </span>
                         </label>
-                      ))}
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Package ID (e.g., 04tKb000000J8s9)
-                    </label>
-                    <input
-                      type="text"
-                      value={packageUrl}
-                      maxLength={15}
-                      onChange={(e) => {
-                        const value = e.target.value.trim();
-                        setPackageUrl(value);
-                        if (value.length > 0 && value.length < 15) {
-                          setPackageIdError('Invalid Package ID');
-                        } else {
-                          setPackageIdError('');
-                        }
-                      }}
-                      className={`w-full px-3 py-2 border ${packageIdError ? 'border-red-500' : 'border-gray-300'} rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500`}
-                      placeholder="04tKb000000J8s9"
-                      disabled={isUpgrading}
-                    />
-                    {packageIdError && (
-                      <p className="text-xs text-red-600 mt-1">{packageIdError}</p>
+                      ))
                     )}
                   </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Concurrent Upgrades (1-4 recommended)
-                    </label>
-                    <select
-                      value={maxConcurrent}
-                      onChange={(e) => setMaxConcurrent(Number(e.target.value))}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      disabled={isUpgrading}
-                    >
-                      <option value={1}>1 (Sequential)</option>
-                      <option value={2}>2 (Recommended)</option>
-                      <option value={3}>3</option>
-                      <option value={4}>4 (Maximum)</option>
-                    </select>
-                    <p className="text-xs text-gray-500 mt-1">
-                      Higher values speed up processing but use more system resources
-                    </p>
-                  </div>
-
-                  <button
-                    onClick={handleBatchUpgrade}
-                    disabled={isUpgrading || selectedOrgs.length === 0 || !packageUrl}
-                    className={`w-full py-2 px-4 rounded-md font-medium transition-colors ${
-                      isUpgrading || selectedOrgs.length === 0 || !packageUrl
-                        ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                        : 'bg-blue-600 text-white hover:bg-blue-700'
-                    }`}
-                  >
-                    {isUpgrading ? `Upgrading ${selectedOrgs.length} orgs...` : `Start Batch Upgrade (${selectedOrgs.length} orgs)`}
-                  </button>
                 </div>
-              </div>
-              {/* Notes Card - right, half width */}
-              <div className="bg-white rounded-lg shadow-md p-6 md:w-1/2 w-full md:mb-0 mb-6 self-start">
-                <h2 className="text-xl font-semibold mb-4">Notes</h2>
-                <ul className="list-disc list-inside space-y-1 text-sm text-gray-600">
-                  <li>If you received an AWS URL with the mail, make sure it's added to SFDC before you trigger upgrade.</li>
-                  <li>Make sure your org credentials are configured in Google Cloud environment variables</li>
-                  <li>Package ID should be the 15-character ID from the Salesforce package URL</li>
-                  <li>Batch upgrades can process multiple orgs in parallel (configurable 1-4)</li>
-                  <li>Higher concurrency speeds up processing but uses more system resources</li>
-                </ul>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Package ID (e.g., 04tKb000000J8s9)
+                  </label>
+                  <input
+                    type="text"
+                    value={packageUrl}
+                    onChange={(e) => setPackageUrl(e.target.value.trim())}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="04tKb000000J8s9"
+                    disabled={isUpgrading}
+                    maxLength={15}
+                  />
+                  {packageUrl && !validatePackageId(packageUrl) && (
+                    <p className="text-red-600 text-sm mt-1">
+                      Invalid format. Package ID must be 15 characters starting with "04t"
+                    </p>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Concurrent Upgrades
+                  </label>
+                  <select
+                    value={maxConcurrent}
+                    onChange={(e) => setMaxConcurrent(Number(e.target.value))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    disabled={isUpgrading}
+                  >
+                    <option value={1}>1 (Sequential - Recommended for Cloud Run)</option>
+                    <option value={2}>2 (Use only with higher memory allocation)</option>
+                  </select>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Cloud Run free tier works best with sequential processing
+                  </p>
+                </div>
+
+                <button
+                  onClick={handleBatchUpgrade}
+                  disabled={isUpgrading || selectedOrgs.length === 0 || !packageUrl || !validatePackageId(packageUrl) || loading}
+                  className={`w-full py-2 px-4 rounded-md font-medium transition-colors ${
+                    isUpgrading || selectedOrgs.length === 0 || !packageUrl || !validatePackageId(packageUrl) || loading
+                      ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                      : 'bg-blue-600 text-white hover:bg-blue-700'
+                  }`}
+                >
+                  {isUpgrading ? `Upgrading ${selectedOrgs.length} orgs...` : `Start Batch Upgrade (${selectedOrgs.length} orgs)`}
+                </button>
               </div>
             </div>
 
@@ -625,8 +724,9 @@ const App: React.FC = () => {
               <button
                 onClick={fetchHistory}
                 className="text-sm text-blue-600 hover:text-blue-800"
+                disabled={loading}
               >
-                Refresh
+                {loading ? 'Loading...' : 'Refresh'}
               </button>
             </div>
             
@@ -697,7 +797,7 @@ const App: React.FC = () => {
         {/* Status Panel - Show for both single and batch */}
         {(activeTab === 'single' || activeTab === 'batch') && (
           <div className="bg-white rounded-lg shadow-md p-6">
-            <h2 className="text-xl font-semibold mb-4">Status Log</h2>
+            <h2 className="text-xl font-semibold mb-4">Automation Status</h2>
             
             {Object.keys(status).length === 0 ? (
               <p className="text-gray-500">No upgrades in progress</p>
@@ -714,6 +814,11 @@ const App: React.FC = () => {
                         </span>
                       </div>
                       <p className="text-sm text-gray-600">{orgStatus.message}</p>
+                      {orgStatus.status === 'verification-required' && (
+                        <p className="text-xs text-purple-600 mt-2">
+                          ⚠️ Manual action required: Please complete verification in the browser window
+                        </p>
+                      )}
                     </div>
                   );
                 })}
@@ -721,6 +826,27 @@ const App: React.FC = () => {
             )}
           </div>
         )}
+
+        <div className="mt-6 text-sm text-gray-600">
+          <p className="font-medium mb-2">Important Notes:</p>
+          <ul className="list-disc list-inside space-y-1">
+            <li>Make sure your org credentials are configured in the backend</li>
+            <li>The automation runs in headless mode on Cloud Run</li>
+            <li>If additional verification is required, the upgrade will fail and need manual intervention</li>
+            <li>Package ID must be exactly 15 characters starting with "04t"</li>
+            <li>Each upgrade typically takes 2-5 minutes to complete</li>
+            <li>Cloud Run has a 5-minute timeout limit per request</li>
+            <li>History shows the last 100 upgrade attempts</li>
+          </ul>
+          
+          {API_URL !== 'http://localhost:5001' && (
+            <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded">
+              <p className="text-green-800 text-xs">
+                <strong>Connected to:</strong> {API_URL}
+              </p>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
