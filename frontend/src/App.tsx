@@ -456,6 +456,28 @@ const App: React.FC = () => {
     
     alert('Test screenshot added to status panel');
   }, [selectedOrg, handleStatusUpdate]);
+
+  // Force error with screenshot for testing
+  const forceErrorScreenshot = useCallback(async () => {
+    if (!selectedOrg) {
+      alert('Please select an organization first');
+      return;
+    }
+    
+    try {
+      startStatusUpdates();
+      await callApi(`${API_URL}/api/force-error-screenshot`, {
+        method: 'POST',
+        body: JSON.stringify({
+          sessionId: sessionId,
+          orgId: selectedOrg
+        }),
+      });
+    } catch (error) {
+      console.error('Error forcing screenshot:', error);
+      alert(`Failed to force error screenshot: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }, [selectedOrg, sessionId, callApi, startStatusUpdates]);
   const handleSingleUpgrade = useCallback(async (): Promise<void> => {
     // Validation
     if (!selectedOrg) {
@@ -935,7 +957,20 @@ const App: React.FC = () => {
                         : 'bg-gray-600 text-white hover:bg-gray-700'
                     }`}
                   >
-                    🧪 Test Screenshot (Debug)
+                    🧪 Test Screenshot (Local)
+                  </button>
+                  
+                  {/* Force Error Screenshot Button */}
+                  <button
+                    onClick={forceErrorScreenshot}
+                    disabled={isUpgrading || !selectedOrg || loading}
+                    className={`w-full py-1 px-4 rounded-md text-sm font-medium transition-colors mt-1 ${
+                      isUpgrading || !selectedOrg || loading
+                        ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                        : 'bg-orange-600 text-white hover:bg-orange-700'
+                    }`}
+                  >
+                    📸 Test Server Screenshot
                   </button>
                 </div>
               </div>
