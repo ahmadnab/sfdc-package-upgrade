@@ -279,6 +279,11 @@ const App: React.FC = () => {
           }
         }));
         
+        // Log screenshot info for debugging
+        if (data.screenshot) {
+          console.log(`Received screenshot for ${data.orgId}, size: ${data.screenshot.length}`);
+        }
+        
         if (data.status === 'completed' || data.status === 'error') {
           if (!data.batchId) {
             setIsUpgrading(false);
@@ -424,7 +429,27 @@ const App: React.FC = () => {
     }
   }, [callApi, sessionId]);
 
-  // Upgrade handlers
+  // Test screenshot function
+  const testScreenshot = useCallback(async () => {
+    if (!selectedOrg) {
+      alert('Please select an organization first');
+      return;
+    }
+    
+    try {
+      startStatusUpdates();
+      await callApi(`${API_URL}/api/test-screenshot`, {
+        method: 'POST',
+        body: JSON.stringify({
+          orgId: selectedOrg,
+          sessionId: sessionId
+        }),
+      });
+    } catch (error) {
+      console.error('Error testing screenshot:', error);
+      alert(`Failed to test screenshot: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }, [selectedOrg, sessionId, callApi, startStatusUpdates]);
   const handleSingleUpgrade = useCallback(async (): Promise<void> => {
     // Validation
     if (!selectedOrg) {
@@ -871,6 +896,19 @@ const App: React.FC = () => {
                   >
                     {isUpgrading ? 'Upgrading...' : 'Start Upgrade'}
                   </button>
+                  
+                  {/* Test Screenshot Button */}
+                  <button
+                    onClick={testScreenshot}
+                    disabled={isUpgrading || !selectedOrg || loading}
+                    className={`w-full py-1 px-4 rounded-md text-sm font-medium transition-colors mt-2 ${
+                      isUpgrading || !selectedOrg || loading
+                        ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                        : 'bg-gray-600 text-white hover:bg-gray-700'
+                    }`}
+                  >
+                    🧪 Test Screenshot (Debug)
+                  </button>
                 </div>
               </div>
             </div>
@@ -1185,14 +1223,18 @@ const App: React.FC = () => {
                                 <p className="text-xs text-red-600" title={entry.error}>
                                   {entry.error.length > 50 ? `${entry.error.substring(0, 50)}...` : entry.error}
                                 </p>
-                                {entry.screenshot && (
-                                  <button
-                                    onClick={() => setShowScreenshot(entry.screenshot!)}
-                                    className="text-xs text-blue-600 hover:text-blue-800 underline mt-1"
-                                  >
-                                    View Screenshot
-                                  </button>
-                                )}
+                                <div className="mt-1">
+                                  {entry.screenshot ? (
+                                    <button
+                                      onClick={() => setShowScreenshot(entry.screenshot!)}
+                                      className="text-xs text-blue-600 hover:text-blue-800 underline"
+                                    >
+                                      📷 View Screenshot
+                                    </button>
+                                  ) : (
+                                    <span className="text-xs text-gray-500">No screenshot</span>
+                                  )}
+                                </div>
                               </div>
                             )}
                           </td>
@@ -1253,13 +1295,21 @@ const App: React.FC = () => {
                         ⚠️ Manual action required: Please complete verification in the browser window
                       </p>
                     )}
-                    {orgStatus.status === 'error' && orgStatus.screenshot && (
-                      <button
-                        onClick={() => setShowScreenshot(orgStatus.screenshot!)}
-                        className="mt-2 text-xs text-blue-600 hover:text-blue-800 underline"
-                      >
-                        View Error Screenshot
-                      </button>
+                    {orgStatus.status === 'error' && (
+                      <div className="mt-2">
+                        {orgStatus.screenshot ? (
+                          <button
+                            onClick={() => setShowScreenshot(orgStatus.screenshot!)}
+                            className="text-xs text-blue-600 hover:text-blue-800 underline"
+                          >
+                            📷 View Error Screenshot
+                          </button>
+                        ) : (
+                          <p className="text-xs text-gray-500">
+                            (No screenshot available)
+                          </p>
+                        )}
+                      </div>
                     )}
                     {orgStatus.timestamp && (
                       <p className="text-xs text-gray-400 mt-2">

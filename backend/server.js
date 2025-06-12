@@ -417,6 +417,75 @@ app.get('/api/status/:sessionId', authenticate, asyncHandler(async (req, res) =>
   res.json(statuses);
 }));
 
+// Manual screenshot test endpoint for debugging
+app.post('/api/test-screenshot', authenticate, asyncHandler(async (req, res) => {
+  const { orgId, sessionId } = req.body;
+  
+  if (!orgId || !sessionId) {
+    return res.status(400).json({ 
+      error: 'Validation error',
+      message: 'Missing required fields: orgId, sessionId'
+    });
+  }
+  
+  try {
+    const config = await loadOrgConfig();
+    const org = config.orgs.find(o => o.id === orgId);
+    
+    if (!org) {
+      return res.status(404).json({ 
+        error: 'Not found',
+        message: `Organization ${orgId} not found`
+      });
+    }
+    
+    // Launch browser and take screenshot
+    const browser = await acquireBrowser();
+    const context = await browser.newContext({
+      viewport: { width: 1366, height: 768 }
+    });
+    const page = await context.newPage();
+    
+    try {
+      await page.goto(org.url, { waitUntil: 'networkidle', timeout: 30000 });
+      
+      const screenshot = await page.screenshot({ 
+        encoding: 'base64',
+        fullPage: true,
+        type: 'png'
+      });
+      
+      const screenshotData = `data:image/png;base64,${screenshot}`;
+      
+      // Send via status update
+      broadcastStatus(sessionId, {
+        type: 'status',
+        orgId: org.id,
+        upgradeId: 'test-screenshot',
+        status: 'error',
+        message: 'Test screenshot captured',
+        screenshot: screenshotData
+      });
+      
+      res.json({ 
+        message: 'Test screenshot captured and sent',
+        screenshotSize: screenshot.length
+      });
+      
+    } finally {
+      await context.close();
+      await releaseBrowser(browser);
+    }
+    
+  } catch (error) {
+    console.error('Error capturing test screenshot:', error);
+    res.status(500).json({ 
+      error: 'Server error',
+      message: error.message
+    });
+  }
+}));
+
 // User confirmation endpoint for version verification
 app.post('/api/confirm-upgrade', authenticate, asyncHandler(async (req, res) => {
   const { sessionId, upgradeId, confirmed } = req.body;
@@ -1029,18 +1098,24 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       }
       
       if (!buttonClicked) {
-        // Take screenshot for debugging
+        // Take screenshot for debugging before throwing error
         try {
+          console.log('Taking debug screenshot - upgrade button not found');
           const screenshot = await page.screenshot({ 
             encoding: 'base64',
-            fullPage: false,
-            type: 'jpeg',
-            quality: 80
+            fullPage: true,
+            type: 'png'
           });
-          failureScreenshot = `data:image/jpeg;base64,${screenshot}`;
-          console.log('Screenshot captured for debugging:', screenshot.length, 'bytes');
+          failureScreenshot = `data:image/png;base64,${screenshot}`;
+          console.log('Debug screenshot captured:', screenshot.length, 'bytes');
+          
+          // Also capture the page content for debugging
+          const pageContent = await page.content();
+          console.log('Page content length:', pageContent.length);
+          console.log('Page title:', await page.title());
+          
         } catch (e) {
-          console.error('Failed to capture screenshot:', e.message);
+          console.error('Failed to capture debug screenshot:', e.message);
         }
         
         throw new Error('Upgrade button not found after trying all strategies');
@@ -1147,16 +1222,30 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       // Capture screenshot on any error
       if (page && !failureScreenshot) {
         try {
+          console.log('Attempting to capture error screenshot...');
           const screenshot = await page.screenshot({ 
             encoding: 'base64',
-            fullPage: false,
-            type: 'jpeg',
-            quality: 80
+            fullPage: true,
+            type: 'png',
+            timeout: 10000
           });
-          failureScreenshot = `data:image/jpeg;base64,${screenshot}`;
-          console.log('Final error screenshot captured:', screenshot.length, 'bytes');
+          failureScreenshot = `data:image/png;base64,${screenshot}`;
+          console.log('Final error screenshot captured (PNG):', screenshot.length, 'bytes');
         } catch (e) {
-          console.error('Failed to capture error screenshot:', e.message);
+          console.error('Failed to capture PNG screenshot, trying JPEG:', e.message);
+          try {
+            const screenshot = await page.screenshot({ 
+              encoding: 'base64',
+              fullPage: false,
+              type: 'jpeg',
+              quality: 90,
+              timeout: 5000
+            });
+            failureScreenshot = `data:image/jpeg;base64,${screenshot}`;
+            console.log('Final error screenshot captured (JPEG):', screenshot.length, 'bytes');
+          } catch (e2) {
+            console.error('Failed to capture any error screenshot:', e2.message);
+          }
         }
       }
       
@@ -1192,21 +1281,39 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       
       console.error(`Upgrade error for ${org.name}:`, error.message);
       
-      broadcastStatus(sessionId, { 
+      // Always broadcast with screenshot if available
+      const statusUpdate = { 
         type: 'status',
         orgId: org.id,
         upgradeId,
         batchId,
         status: 'error', 
-        message: `Error: ${error.message}`,
-        screenshot: failureScreenshot
-      });
+        message: `Error: ${error.message}`
+      };
+      
+      if (failureScreenshot) {
+        statusUpdate.screenshot = failureScreenshot;
+        console.log('Broadcasting error status with screenshot, size:', failureScreenshot.length);
+      } else {
+        console.log('Broadcasting error status without screenshot');
+      }
+      
+      broadcastStatus(sessionId, statusUpdate);
       
       throw error;
       
     } finally {
-      // Always save history
+      // Always save history with screenshot info
       await addToHistory(historyEntry);
+      
+      // Debug log the final history entry
+      console.log('Final history entry:', {
+        id: historyEntry.id,
+        status: historyEntry.status,
+        error: historyEntry.error,
+        hasScreenshot: !!historyEntry.screenshot,
+        screenshotSize: historyEntry.screenshot ? historyEntry.screenshot.length : 0
+      });
       
       // Cleanup with proper error handling
       if (page) {
