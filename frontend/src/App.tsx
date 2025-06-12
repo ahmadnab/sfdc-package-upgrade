@@ -457,7 +457,7 @@ const App: React.FC = () => {
     alert('Test screenshot added to status panel');
   }, [selectedOrg, handleStatusUpdate]);
 
-  // Force error with screenshot for testing
+  // Force error with screenshot for testing (using existing endpoint)
   const forceErrorScreenshot = useCallback(async () => {
     if (!selectedOrg) {
       alert('Please select an organization first');
@@ -466,16 +466,17 @@ const App: React.FC = () => {
     
     try {
       startStatusUpdates();
-      await callApi(`${API_URL}/api/force-error-screenshot`, {
+      await callApi(`${API_URL}/api/test-screenshot`, {
         method: 'POST',
         body: JSON.stringify({
           sessionId: sessionId,
           orgId: selectedOrg
         }),
       });
+      alert('Server screenshot test initiated! Check the status panel for results.');
     } catch (error) {
-      console.error('Error forcing screenshot:', error);
-      alert(`Failed to force error screenshot: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      console.error('Error testing server screenshot:', error);
+      alert(`Failed to test server screenshot: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }, [selectedOrg, sessionId, callApi, startStatusUpdates]);
   const handleSingleUpgrade = useCallback(async (): Promise<void> => {

@@ -340,8 +340,7 @@ app.get('/', (req, res) => {
       { path: '/api/upgrade', method: 'POST', description: 'Single org upgrade' },
       { path: '/api/upgrade-batch', method: 'POST', description: 'Batch upgrade' },
       { path: '/api/confirm-upgrade', method: 'POST', description: 'Confirm upgrade version' },
-      { path: '/api/test-screenshot', method: 'POST', description: 'Test screenshot capture (debug)' },
-      { path: '/api/force-error-screenshot', method: 'POST', description: 'Force error with screenshot (debug)' },
+      { path: '/api/test-screenshot', method: 'POST', description: 'Test server screenshot capture' },
       { path: '/api/history', method: 'GET', description: 'Upgrade history' },
       { path: '/api/status/:sessionId', method: 'GET', description: 'Status updates (polling)' },
       { path: '/api/status-stream/:sessionId', method: 'GET', description: 'Status updates (SSE)' }
@@ -615,7 +614,7 @@ app.post('/api/test-screenshot', authenticate, asyncHandler(async (req, res) => 
     
     console.log(`Testing screenshot for org: ${org.name}`);
     
-    // Launch browser and take screenshot
+    // Create a test error page and screenshot it (no need to visit actual org)
     const browser = await acquireBrowser();
     const context = await browser.newContext({
       viewport: { width: 1366, height: 768 },
@@ -624,8 +623,79 @@ app.post('/api/test-screenshot', authenticate, asyncHandler(async (req, res) => 
     const page = await context.newPage();
     
     try {
-      console.log(`Navigating to: ${org.url}`);
-      await page.goto(org.url, { waitUntil: 'networkidle', timeout: 30000 });
+      console.log('Creating test error page...');
+      
+      // Create a realistic error page that looks like a Salesforce error
+      await page.setContent(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>Package Installation Error - Salesforce</title>
+          <style>
+            body { 
+              font-family: 'Salesforce Sans', Arial, sans-serif; 
+              margin: 0; 
+              padding: 20px; 
+              background: #f3f2f2; 
+            }
+            .slds-scope { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+            .error-header { 
+              background: #c23934; 
+              color: white; 
+              padding: 15px; 
+              margin: -20px -20px 20px -20px;
+              border-radius: 8px 8px 0 0;
+            }
+            .error-content { line-height: 1.6; }
+            .package-info { 
+              background: #f8f9fa; 
+              padding: 15px; 
+              border-left: 4px solid #0176d3; 
+              margin: 15px 0; 
+            }
+            .timestamp { color: #666; font-size: 12px; margin-top: 20px; border-top: 1px solid #ddd; padding-top: 10px; }
+            .code { font-family: monospace; background: #f1f1f1; padding: 2px 4px; border-radius: 3px; }
+          </style>
+        </head>
+        <body>
+          <div class="slds-scope">
+            <div class="error-header">
+              <h1>⚠️ Package Installation Failed</h1>
+            </div>
+            <div class="error-content">
+              <p><strong>Organization:</strong> ${org.name}</p>
+              <p><strong>Error:</strong> This is a <em>simulated error</em> to test screenshot capture functionality.</p>
+              
+              <div class="package-info">
+                <h3>Package Details</h3>
+                <p><strong>Package ID:</strong> <span class="code">04tTEST123456789</span></p>
+                <p><strong>Version:</strong> 1.0.0.BETA</p>
+                <p><strong>Status:</strong> ❌ Installation Failed</p>
+              </div>
+              
+              <p><strong>Possible Causes:</strong></p>
+              <ul>
+                <li>Missing required permissions</li>
+                <li>Package dependencies not met</li>
+                <li>Custom objects conflict</li>
+                <li>Validation rules blocking installation</li>
+              </ul>
+              
+              <p><strong>Screenshot Test Status:</strong> ✅ Server-side screenshot capture is working correctly!</p>
+              
+              <div class="timestamp">
+                Screenshot captured: ${new Date().toLocaleString()}<br>
+                Server: Cloud Run Instance<br>
+                Browser: Chromium ${process.version}
+              </div>
+            </div>
+          </div>
+        </body>
+        </html>
+      `);
+      
+      // Wait a moment for page to render
+      await page.waitForTimeout(1000);
       
       console.log('Taking test screenshot...');
       const screenshot = await page.screenshot({ 
@@ -635,20 +705,21 @@ app.post('/api/test-screenshot', authenticate, asyncHandler(async (req, res) => 
       });
       
       const screenshotData = `data:image/png;base64,${screenshot}`;
-      console.log(`Test screenshot captured: ${screenshot.length} bytes`);
+      console.log(`✅ Test screenshot captured: ${screenshot.length} bytes`);
       
-      // Send via status update
+      // Send via status update as an error with screenshot
       broadcastStatus(sessionId, {
         type: 'status',
         orgId: org.id,
-        upgradeId: 'test-screenshot',
+        upgradeId: 'server-screenshot-test',
         status: 'error',
-        message: 'Test screenshot captured successfully',
+        message: `Server screenshot test completed successfully for ${org.name}`,
         screenshot: screenshotData
       });
       
       res.json({ 
-        message: 'Test screenshot captured and sent',
+        success: true,
+        message: 'Server screenshot test completed and sent via status updates',
         screenshotSize: screenshot.length,
         orgName: org.name
       });
