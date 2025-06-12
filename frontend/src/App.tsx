@@ -169,7 +169,7 @@ const App: React.FC = () => {
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'error'>('connecting');
   const [showScreenshot, setShowScreenshot] = useState<string | null>(null);
   const [lastHeartbeat, setLastHeartbeat] = useState<number>(Date.now());
-  const [activeBrowserCount, setActiveBrowserCount] = useState<number>(0);
+  const [activeBrowserCount] = useState<number>(0);
   const [versionConfirmations, setVersionConfirmations] = useState<Record<string, VersionConfirmationUpdate>>({});
 
   // Refs
@@ -178,6 +178,56 @@ const App: React.FC = () => {
 
   // Custom hook
   const { callApi, loading, error: apiError, setLoading, setError: setApiError } = useApiCall();
+
+  // Screenshot validation utility
+  const validateScreenshot = useCallback((screenshot: string): { isValid: boolean; error?: string } => {
+    if (!screenshot) return { isValid: false, error: 'Empty screenshot' };
+    
+    if (!screenshot.startsWith('data:image/')) {
+      return { isValid: false, error: 'Not a data URL' };
+    }
+    
+    if (!screenshot.includes('base64,')) {
+      return { isValid: false, error: 'Not base64 encoded' };
+    }
+    
+    // Extract base64 part
+    const base64Part = screenshot.split('base64,')[1];
+    if (!base64Part) {
+      return { isValid: false, error: 'No base64 data' };
+    }
+    
+    // Check for valid base64 characters
+    const base64Regex = /^[A-Za-z0-9+/]*={0,2}$/;
+    if (!base64Regex.test(base64Part)) {
+      return { isValid: false, error: 'Invalid base64 characters' };
+    }
+    
+    // Check length (should be divisible by 4)
+    if (base64Part.length % 4 !== 0) {
+      return { isValid: false, error: 'Invalid base64 length' };
+    }
+    
+    return { isValid: true };
+  }, []);
+
+  // Clean screenshot data
+  const cleanScreenshot = useCallback((screenshot: string): string => {
+    if (!screenshot) return '';
+    
+    // Remove any whitespace or line breaks
+    let cleaned = screenshot.replace(/\s/g, '');
+    
+    // Ensure proper data URL format
+    if (cleaned.startsWith('data:image/') && cleaned.includes('base64,')) {
+      const [header, base64Data] = cleaned.split('base64,');
+      // Clean the base64 part
+      const cleanBase64 = base64Data.replace(/[^A-Za-z0-9+/=]/g, '');
+      cleaned = `${header}base64,${cleanBase64}`;
+    }
+    
+    return cleaned;
+  }, []);
 
   // Fetch functions
   const fetchOrgs = useCallback(async () => {
@@ -249,9 +299,34 @@ const App: React.FC = () => {
     return packageId.length === 15 && /^04t[a-zA-Z0-9]{12}$/.test(packageId);
   }, []);
 
+  // Connection management - Define stopStatusUpdates first to avoid circular dependencies
+  const stopStatusUpdates = useCallback(() => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+      pollingIntervalRef.current = null;
+    }
+    setConnectionStatus('disconnected');
+  }, []);
+
   // Status update handling
   const handleStatusUpdate = useCallback((data: any) => {
     try {
+      // Enhanced debug log for all event types
+      console.log('[DEBUG][handleStatusUpdate] EVENT:', {
+        type: data.type,
+        orgId: data.orgId,
+        upgradeId: data.upgradeId,
+        status: data.status,
+        message: data.message,
+        keys: Object.keys(data),
+        screenshot: data.screenshot ? `present (${data.screenshot.length} chars)` : 'absent',
+        preview: data.screenshot ? data.screenshot.substring(0, 40) + '...' : undefined
+      });
+
       // Update heartbeat timestamp
       if (data.type === 'heartbeat' || data.timestamp) {
         setLastHeartbeat(Date.now());
@@ -271,23 +346,46 @@ const App: React.FC = () => {
       }
 
       if (data.type === 'status') {
-        setStatus(prev => ({
-          ...prev,
-          [data.orgId]: {
-            ...data,
-            screenshot: data.screenshot || prev[data.orgId]?.screenshot
-          }
-        }));
-        
-        // Log screenshot info for debugging
+        let cleanedScreenshot: string | undefined = data.screenshot;
+        // Clean and validate screenshot if present
         if (data.screenshot) {
-          console.log(`Received screenshot for ${data.orgId}, size: ${data.screenshot.length}`);
+          cleanedScreenshot = cleanScreenshot(data.screenshot);
+          const validation = validateScreenshot(cleanedScreenshot);
+          if (validation.isValid) {
+            console.log(`✅ Valid screenshot received for ${data.orgId}, size: ${cleanedScreenshot.length}`);
+          } else {
+            console.warn(`⚠️ Invalid screenshot for ${data.orgId}: ${validation.error}`);
+            console.warn('Original data:', data.screenshot.substring(0, 100));
+            console.warn('Cleaned data:', cleanedScreenshot.substring(0, 100));
+            // Don't use invalid screenshot
+            cleanedScreenshot = undefined;
+          }
         }
+        setStatus(prev => {
+          const prevStatus = prev[data.orgId] || {};
+          const mergedStatus = {
+            ...data,
+            screenshot: data.screenshot !== undefined ? cleanedScreenshot : prevStatus.screenshot
+          };
+          console.log('[DEBUG] setStatus (status event):', {
+            orgId: data.orgId,
+            prevStatus,
+            cleanedScreenshotLength: cleanedScreenshot ? cleanedScreenshot.length : 0,
+            mergedStatus,
+          });
+          return {
+            ...prev,
+            [data.orgId]: mergedStatus
+          };
+        });
         
         if (data.status === 'completed' || data.status === 'error') {
           if (!data.batchId) {
             setIsUpgrading(false);
-            stopStatusUpdates();
+            // Delay closing SSE to allow screenshot event to arrive
+            setTimeout(() => {
+              stopStatusUpdates();
+            }, 2000); // 2 seconds
           }
           // Refresh history after a short delay
           setTimeout(() => fetchHistory(0), 1000);
@@ -304,20 +402,49 @@ const App: React.FC = () => {
       } else if (data.type === 'batch-progress') {
         setBatchProgress(data);
       } else if (data.type === 'screenshot') {
-        // Handle separate screenshot data
+        // Handle separate screenshot data with validation
         console.log(`Received separate screenshot for ${data.orgId}, size: ${data.screenshot?.length || 0}`);
-        setStatus(prev => ({
-          ...prev,
-          [data.orgId]: {
-            ...prev[data.orgId],
-            screenshot: data.screenshot
+        let cleanedScreenshot: string | undefined = undefined;
+        if (data.screenshot) {
+          cleanedScreenshot = cleanScreenshot(data.screenshot);
+          const validation = validateScreenshot(cleanedScreenshot);
+          if (validation.isValid) {
+            console.log(`✅ Valid separate screenshot for ${data.orgId}`);
+          } else {
+            console.error(`❌ Invalid separate screenshot for ${data.orgId}: ${validation.error}`);
+            cleanedScreenshot = undefined;
           }
-        }));
+        }
+        if (cleanedScreenshot) {
+          setStatus(prev => {
+            const prevStatus = prev[data.orgId] || {};
+            const newStatus = {
+              ...prevStatus,
+              screenshot: cleanedScreenshot,
+              // Fallbacks for required fields if missing
+              status: prevStatus.status ?? 'error',
+              message: prevStatus.message ?? 'Screenshot received',
+              // Also propagate upgradeId and batchId if present in the event
+              upgradeId: prevStatus.upgradeId ?? data.upgradeId,
+              batchId: prevStatus.batchId ?? data.batchId
+            };
+            console.log('[DEBUG] setStatus (screenshot event):', {
+              orgId: data.orgId,
+              prevStatus,
+              cleanedScreenshotLength: cleanedScreenshot ? cleanedScreenshot.length : 0,
+              newStatus,
+            });
+            return {
+              ...prev,
+              [data.orgId]: newStatus
+            };
+          });
+        }
       }
     } catch (error) {
       console.error('Error handling status update:', error);
     }
-  }, [fetchHistory]);
+  }, [fetchHistory, cleanScreenshot, validateScreenshot, stopStatusUpdates]);
 
   // Connection management
   const startPolling = useCallback(() => {
@@ -346,7 +473,7 @@ const App: React.FC = () => {
         }
       }
     }, 2000); // Slightly slower polling to reduce server load
-  }, [callApi, sessionId, handleStatusUpdate]);
+  }, [callApi, sessionId, handleStatusUpdate, stopStatusUpdates]);
 
   const startStatusUpdates = useCallback(() => {
     setConnectionError(null);
@@ -362,6 +489,9 @@ const App: React.FC = () => {
         eventSourceRef.current = new EventSource(url.toString());
         
         eventSourceRef.current.onmessage = (event) => {
+          // Raw event debug log
+          console.log('[SSE RAW]', event.data);
+
           try {
             const data = JSON.parse(event.data);
             handleStatusUpdate(data);
@@ -392,18 +522,6 @@ const App: React.FC = () => {
       startPolling();
     }
   }, [useSSE, sessionId, handleStatusUpdate, startPolling]);
-
-  const stopStatusUpdates = useCallback(() => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
-    }
-    if (pollingIntervalRef.current) {
-      clearInterval(pollingIntervalRef.current);
-      pollingIntervalRef.current = null;
-    }
-    setConnectionStatus('disconnected');
-  }, []);
 
   // Version confirmation handling
   const handleVersionConfirmation = useCallback(async (upgradeId: string, confirmed: boolean) => {
@@ -457,6 +575,26 @@ const App: React.FC = () => {
     alert('Test screenshot added to status panel');
   }, [selectedOrg, handleStatusUpdate]);
 
+  const testValidScreenshot = useCallback(async () => {
+    // Create a small valid PNG image (red square)
+    const validBase64 = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==';
+    
+    const testStatusUpdate = {
+      type: 'status',
+      orgId: selectedOrg || 'test-org',
+      upgradeId: 'valid-test-' + Date.now(),
+      status: 'error',
+      message: 'Testing with valid base64 image data',
+      screenshot: validBase64,
+      timestamp: Date.now()
+    };
+    
+    console.log('Testing with valid base64 image:', validBase64.length, 'chars');
+    handleStatusUpdate(testStatusUpdate);
+    
+    alert('Valid base64 test screenshot added');
+  }, [selectedOrg, handleStatusUpdate]);
+
   // Force error with screenshot for testing (using existing endpoint)
   const forceErrorScreenshot = useCallback(async () => {
     if (!selectedOrg) {
@@ -479,6 +617,7 @@ const App: React.FC = () => {
       alert(`Failed to test server screenshot: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }, [selectedOrg, sessionId, callApi, startStatusUpdates]);
+
   const handleSingleUpgrade = useCallback(async (): Promise<void> => {
     // Validation
     if (!selectedOrg) {
@@ -783,7 +922,8 @@ const App: React.FC = () => {
   };
 
   const ScreenshotModal = ({ screenshot, onClose }: { screenshot: string; onClose: () => void }) => {
-    const isTestScreenshot = screenshot.includes('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==');
+    const isTestScreenshot = screenshot.includes('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR42mP8/5+BgYGBgYkDABYgAQdcaYZjAAAAAElFTkSuQmCC');
+    const validation = validateScreenshot(screenshot);
     
     return (
       <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4" onClick={onClose}>
@@ -800,22 +940,63 @@ const App: React.FC = () => {
             </button>
           </div>
           <div className="p-4 overflow-auto max-h-[calc(90vh-8rem)]">
-            {isTestScreenshot ? (
+            {!validation.isValid ? (
+              <div className="text-center py-8">
+                <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
+                  ❌ Invalid Screenshot Data
+                </div>
+                <p className="text-gray-600 mb-4">
+                  The screenshot data received is not in a valid format: {validation.error}
+                </p>
+                <div className="text-xs bg-gray-100 p-4 rounded text-left">
+                  <strong>Debug Info:</strong><br/>
+                  Length: {screenshot.length} chars<br/>
+                  Error: {validation.error}<br/>
+                  Preview: {screenshot.substring(0, 100)}...
+                </div>
+              </div>
+            ) : isTestScreenshot ? (
               <div className="text-center py-8">
                 <div className="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded mb-4">
-                  ✅ Screenshot capture system is working!
+                  ✅ Screenshot validation passed!
                 </div>
                 <p className="text-gray-600">
-                  This is a test screenshot. The screenshot capture mechanism is functional.<br/>
-                  Real screenshots will show the actual page content when errors occur.
+                  This is a test screenshot (2x2 red square). The screenshot capture and display system is working correctly.
                 </p>
                 <div className="mt-4 p-4 bg-gray-100 rounded">
-                  <img src={screenshot} alt="Test screenshot" className="mx-auto" style={{imageRendering: 'pixelated', width: '100px', height: '100px'}} />
-                  <p className="text-xs text-gray-500 mt-2">1x1 pixel test image</p>
+                  <img 
+                    src={screenshot} 
+                    alt="Test screenshot" 
+                    className="mx-auto border border-gray-300" 
+                    style={{imageRendering: 'pixelated', width: '100px', height: '100px'}} 
+                  />
+                  <p className="text-xs text-gray-500 mt-2">2x2 pixel test image (scaled up)</p>
                 </div>
               </div>
             ) : (
-              <img src={screenshot} alt="Error screenshot" className="max-w-full h-auto" />
+              <div>
+                <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded">
+                  <p className="text-green-700 text-sm">✅ Screenshot validation passed</p>
+                </div>
+                <img 
+                  src={screenshot} 
+                  alt="Error screenshot" 
+                  className="max-w-full h-auto border border-gray-300 rounded"
+                  onError={(e) => {
+                    console.error('Image load error:', e);
+                    (e.target as HTMLImageElement).style.display = 'none';
+                    const errorDiv = document.createElement('div');
+                    errorDiv.className = 'text-center py-8';
+                    errorDiv.innerHTML = `
+                      <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
+                        ❌ Failed to display screenshot
+                      </div>
+                      <p class="text-gray-600">Screenshot data validation passed but image failed to load.</p>
+                    `;
+                    (e.target as HTMLImageElement).parentNode?.appendChild(errorDiv);
+                  }}
+                />
+              </div>
             )}
           </div>
           <div className="p-4 border-t">
@@ -968,10 +1149,23 @@ const App: React.FC = () => {
                     className={`w-full py-1 px-4 rounded-md text-sm font-medium transition-colors mt-1 ${
                       isUpgrading || !selectedOrg || loading
                         ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
-                        : 'bg-orange-600 text-white hover:bg-orange-700'
+                        : 'bg-blue-100 text-blue-900 hover:bg-blue-200'
                     }`}
                   >
                     📸 Test Server Screenshot
+                  </button>
+                  
+                  {/* Test Valid Base64 Button */}
+                  <button
+                    onClick={testValidScreenshot}
+                    disabled={isUpgrading || loading}
+                    className={`w-full py-1 px-4 rounded-md text-sm font-medium transition-colors mt-1 ${
+                      isUpgrading || loading
+                        ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                        : 'bg-green-600 text-white hover:bg-green-700'
+                    }`}
+                  >
+                    ✅ Test Valid Base64
                   </button>
                 </div>
               </div>
@@ -1347,6 +1541,13 @@ const App: React.FC = () => {
                     status: status[key].status,
                     hasScreenshot: !!status[key].screenshot,
                     screenshotSize: status[key].screenshot?.length || 0,
+                    screenshotFormat: (() => {
+                      const screenshot = status[key].screenshot;
+                      if (!screenshot) return 'None';
+                      const validation = validateScreenshot(screenshot);
+                      return validation.isValid ? 'Valid' : `Invalid: ${validation.error}`;
+                    })(),
+                    screenshotPreview: status[key].screenshot?.substring(0, 50) + '...',
                     message: status[key].message
                   }
                 }), {}), null, 2)}</pre>

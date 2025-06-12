@@ -219,9 +219,19 @@ function broadcastStatus(sessionId, data) {
   try {
     // Add timestamp
     data.timestamp = Date.now();
+    // Debug log for screenshot emission
+    if (data.screenshot) {
+      console.log(`[BROADCAST] Emitting event for sessionId=${sessionId}, orgId=${data.orgId}, type=${data.type}, screenshotSize=${data.screenshot.length}`);
+    } else {
+      console.log(`[BROADCAST] Emitting event for sessionId=${sessionId}, orgId=${data.orgId}, type=${data.type}, no screenshot`);
+    }
     
-    // Log significant events
+    // Log significant events (but not screenshot data to avoid log pollution)
     if (data.type === 'status' && (data.status === 'completed' || data.status === 'error')) {
+      const logData = { ...data };
+      if (logData.screenshot) {
+        logData.screenshot = `[SCREENSHOT:${logData.screenshot.length}bytes]`;
+      }
       console.log(`Status Update: ${data.orgId} - ${data.status}: ${data.message}`);
     }
     
@@ -229,20 +239,38 @@ function broadcastStatus(sessionId, data) {
     const client = sseClients.get(sessionId);
     if (client && !client.destroyed) {
       try {
-        // For very large screenshots, send separately
-        if (data.screenshot && data.screenshot.length > 100000) {
+        // Handle large screenshots by chunking or separate transmission
+        if (data.screenshot && data.screenshot.length >= 100000) {
+          console.log(`Large screenshot detected: ${data.screenshot.length} bytes, sending separately`);
           // Send status without screenshot first
           const statusWithoutScreenshot = { ...data };
           delete statusWithoutScreenshot.screenshot;
           client.write(`data: ${JSON.stringify(statusWithoutScreenshot)}\n\n`);
-          
-          // Then send screenshot separately
-          client.write(`data: ${JSON.stringify({ 
-            type: 'screenshot',
-            orgId: data.orgId,
-            screenshot: data.screenshot 
-          })}\n\n`);
+          // Add a short delay before sending the screenshot event
+          setTimeout(() => {
+            try {
+              client.write(`data: ${JSON.stringify({ 
+                type: 'screenshot',
+                orgId: data.orgId,
+                upgradeId: data.upgradeId,
+                status: data.status, // Add status for context
+                message: data.message, // Add message for context
+                screenshot: data.screenshot 
+              })}\n\n`);
+            } catch (chunkError) {
+              console.error('Error sending screenshot chunk:', chunkError.message);
+              // Send a fallback message
+              client.write(`data: ${JSON.stringify({ 
+                type: 'status',
+                orgId: data.orgId,
+                upgradeId: data.upgradeId,
+                status: 'error',
+                message: 'Screenshot captured but transmission failed - check server logs'
+              })}\n\n`);
+            }
+          }, 100); // 100ms delay
         } else {
+          // Normal size, send together
           client.write(`data: ${JSON.stringify(data)}\n\n`);
         }
       } catch (writeError) {
@@ -593,66 +621,40 @@ async function createTestScreenshot() {
 // Manual screenshot test endpoint for debugging
 app.post('/api/test-screenshot', authenticate, asyncHandler(async (req, res) => {
   const { orgId, sessionId } = req.body;
-  
   if (!orgId || !sessionId) {
     return res.status(400).json({ 
       error: 'Validation error',
       message: 'Missing required fields: orgId, sessionId'
     });
   }
-  
   try {
     const config = await loadOrgConfig();
     const org = config.orgs.find(o => o.id === orgId);
-    
     if (!org) {
       return res.status(404).json({ 
         error: 'Not found',
         message: `Organization ${orgId} not found`
       });
     }
-    
     console.log(`Testing screenshot for org: ${org.name}`);
-    
-    // Create a test error page and screenshot it (no need to visit actual org)
     const browser = await acquireBrowser();
     const context = await browser.newContext({
       viewport: { width: 1366, height: 768 },
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     });
     const page = await context.newPage();
-    
     try {
-      console.log('Creating test error page...');
-      
-      // Create a realistic error page that looks like a Salesforce error
       await page.setContent(`
         <!DOCTYPE html>
         <html>
         <head>
           <title>Package Installation Error - Salesforce</title>
           <style>
-            body { 
-              font-family: 'Salesforce Sans', Arial, sans-serif; 
-              margin: 0; 
-              padding: 20px; 
-              background: #f3f2f2; 
-            }
+            body { font-family: 'Salesforce Sans', Arial, sans-serif; margin: 0; padding: 20px; background: #f3f2f2; }
             .slds-scope { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-            .error-header { 
-              background: #c23934; 
-              color: white; 
-              padding: 15px; 
-              margin: -20px -20px 20px -20px;
-              border-radius: 8px 8px 0 0;
-            }
+            .error-header { background: #c23934; color: white; padding: 15px; margin: -20px -20px 20px -20px; border-radius: 8px 8px 0 0; }
             .error-content { line-height: 1.6; }
-            .package-info { 
-              background: #f8f9fa; 
-              padding: 15px; 
-              border-left: 4px solid #0176d3; 
-              margin: 15px 0; 
-            }
+            .package-info { background: #f8f9fa; padding: 15px; border-left: 4px solid #0176d3; margin: 15px 0; }
             .timestamp { color: #666; font-size: 12px; margin-top: 20px; border-top: 1px solid #ddd; padding-top: 10px; }
             .code { font-family: monospace; background: #f1f1f1; padding: 2px 4px; border-radius: 3px; }
           </style>
@@ -665,14 +667,12 @@ app.post('/api/test-screenshot', authenticate, asyncHandler(async (req, res) => 
             <div class="error-content">
               <p><strong>Organization:</strong> ${org.name}</p>
               <p><strong>Error:</strong> This is a <em>simulated error</em> to test screenshot capture functionality.</p>
-              
               <div class="package-info">
                 <h3>Package Details</h3>
                 <p><strong>Package ID:</strong> <span class="code">04tTEST123456789</span></p>
                 <p><strong>Version:</strong> 1.0.0.BETA</p>
                 <p><strong>Status:</strong> ❌ Installation Failed</p>
               </div>
-              
               <p><strong>Possible Causes:</strong></p>
               <ul>
                 <li>Missing required permissions</li>
@@ -680,9 +680,7 @@ app.post('/api/test-screenshot', authenticate, asyncHandler(async (req, res) => 
                 <li>Custom objects conflict</li>
                 <li>Validation rules blocking installation</li>
               </ul>
-              
               <p><strong>Screenshot Test Status:</strong> ✅ Server-side screenshot capture is working correctly!</p>
-              
               <div class="timestamp">
                 Screenshot captured: ${new Date().toLocaleString()}<br>
                 Server: Cloud Run Instance<br>
@@ -693,21 +691,35 @@ app.post('/api/test-screenshot', authenticate, asyncHandler(async (req, res) => 
         </body>
         </html>
       `);
-      
-      // Wait a moment for page to render
-      await page.waitForTimeout(1000);
-      
-      console.log('Taking test screenshot...');
-      const screenshot = await page.screenshot({ 
-        encoding: 'base64',
-        fullPage: true,
-        type: 'png'
-      });
-      
-      const screenshotData = `data:image/png;base64,${screenshot}`;
-      console.log(`✅ Test screenshot captured: ${screenshot.length} bytes`);
-      
-      // Send via status update as an error with screenshot
+      // Wait longer for page to render
+      await page.waitForTimeout(2000);
+      let screenshot = await page.screenshot({ encoding: 'base64', fullPage: true, type: 'png' });
+      if (Buffer.isBuffer(screenshot)) {
+        screenshot = screenshot.toString('base64');
+      }
+      let screenshotData = `data:image/png;base64,${screenshot}`;
+      // Validate screenshot
+      let isValid = typeof screenshot === 'string' && screenshot.length > 0 && !screenshot.includes('\n') && !screenshot.includes('\r');
+      if (!isValid) {
+        console.warn('First screenshot invalid, retrying after extra wait...');
+        await page.waitForTimeout(2000);
+        screenshot = await page.screenshot({ encoding: 'base64', fullPage: true, type: 'png' });
+        if (Buffer.isBuffer(screenshot)) {
+          screenshot = screenshot.toString('base64');
+        }
+        screenshotData = `data:image/png;base64,${screenshot}`;
+        isValid = typeof screenshot === 'string' && screenshot.length > 0 && !screenshot.includes('\n') && !screenshot.includes('\r');
+      }
+      if (isValid) {
+        console.log(`✅ Test screenshot captured: ${screenshot.length} bytes (base64)`);
+        console.log(`✅ Data URL length: ${screenshotData.length} bytes`);
+        console.log(`Preview: ${typeof screenshot === 'string' ? screenshot.substring(0, 80) : '[not a string]'}...`);
+      } else {
+        console.error('❌ Invalid screenshot data detected after retry');
+        console.error('Screenshot length:', screenshot ? screenshot.length : 0);
+        console.error('Screenshot preview:', typeof screenshot === 'string' ? screenshot.substring(0, 80) : '[not a string]');
+        throw new Error('Screenshot data validation failed');
+      }
       broadcastStatus(sessionId, {
         type: 'status',
         orgId: org.id,
@@ -716,19 +728,16 @@ app.post('/api/test-screenshot', authenticate, asyncHandler(async (req, res) => 
         message: `Server screenshot test completed successfully for ${org.name}`,
         screenshot: screenshotData
       });
-      
       res.json({ 
         success: true,
         message: 'Server screenshot test completed and sent via status updates',
         screenshotSize: screenshot.length,
         orgName: org.name
       });
-      
     } finally {
       await context.close();
       await releaseBrowser(browser);
     }
-    
   } catch (error) {
     console.error('Error capturing test screenshot:', error);
     res.status(500).json({ 
@@ -738,7 +747,7 @@ app.post('/api/test-screenshot', authenticate, asyncHandler(async (req, res) => 
   }
 }));
 
-// Single upgrade with improved validation
+// API Routes continued...
 app.post('/api/upgrade', authenticate, validatePackageId, asyncHandler(async (req, res) => {
   const { orgId, packageUrl, sessionId } = req.body;
   
@@ -1007,8 +1016,7 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         ignoreHTTPSErrors: true,
         locale: 'en-US',
-        timezoneId: 'America/New_York',
-        httpCredentials: null
+        timezoneId: 'America/New_York'
       });
       
       page = await context.newPage();
