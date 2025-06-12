@@ -339,6 +339,8 @@ app.get('/', (req, res) => {
       { path: '/api/orgs', method: 'GET', description: 'List organizations' },
       { path: '/api/upgrade', method: 'POST', description: 'Single org upgrade' },
       { path: '/api/upgrade-batch', method: 'POST', description: 'Batch upgrade' },
+      { path: '/api/confirm-upgrade', method: 'POST', description: 'Confirm upgrade version' },
+      { path: '/api/test-screenshot', method: 'POST', description: 'Test screenshot capture (debug)' },
       { path: '/api/history', method: 'GET', description: 'Upgrade history' },
       { path: '/api/status/:sessionId', method: 'GET', description: 'Status updates (polling)' },
       { path: '/api/status-stream/:sessionId', method: 'GET', description: 'Status updates (SSE)' }
@@ -415,75 +417,6 @@ app.get('/api/status/:sessionId', authenticate, asyncHandler(async (req, res) =>
   }
   
   res.json(statuses);
-}));
-
-// Manual screenshot test endpoint for debugging
-app.post('/api/test-screenshot', authenticate, asyncHandler(async (req, res) => {
-  const { orgId, sessionId } = req.body;
-  
-  if (!orgId || !sessionId) {
-    return res.status(400).json({ 
-      error: 'Validation error',
-      message: 'Missing required fields: orgId, sessionId'
-    });
-  }
-  
-  try {
-    const config = await loadOrgConfig();
-    const org = config.orgs.find(o => o.id === orgId);
-    
-    if (!org) {
-      return res.status(404).json({ 
-        error: 'Not found',
-        message: `Organization ${orgId} not found`
-      });
-    }
-    
-    // Launch browser and take screenshot
-    const browser = await acquireBrowser();
-    const context = await browser.newContext({
-      viewport: { width: 1366, height: 768 }
-    });
-    const page = await context.newPage();
-    
-    try {
-      await page.goto(org.url, { waitUntil: 'networkidle', timeout: 30000 });
-      
-      const screenshot = await page.screenshot({ 
-        encoding: 'base64',
-        fullPage: true,
-        type: 'png'
-      });
-      
-      const screenshotData = `data:image/png;base64,${screenshot}`;
-      
-      // Send via status update
-      broadcastStatus(sessionId, {
-        type: 'status',
-        orgId: org.id,
-        upgradeId: 'test-screenshot',
-        status: 'error',
-        message: 'Test screenshot captured',
-        screenshot: screenshotData
-      });
-      
-      res.json({ 
-        message: 'Test screenshot captured and sent',
-        screenshotSize: screenshot.length
-      });
-      
-    } finally {
-      await context.close();
-      await releaseBrowser(browser);
-    }
-    
-  } catch (error) {
-    console.error('Error capturing test screenshot:', error);
-    res.status(500).json({ 
-      error: 'Server error',
-      message: error.message
-    });
-  }
 }));
 
 // User confirmation endpoint for version verification
@@ -565,6 +498,82 @@ app.get('/api/history', authenticate, asyncHandler(async (req, res) => {
       total: 0,
       limit: 50,
       offset: 0
+    });
+  }
+}));
+
+// Manual screenshot test endpoint for debugging
+app.post('/api/test-screenshot', authenticate, asyncHandler(async (req, res) => {
+  const { orgId, sessionId } = req.body;
+  
+  if (!orgId || !sessionId) {
+    return res.status(400).json({ 
+      error: 'Validation error',
+      message: 'Missing required fields: orgId, sessionId'
+    });
+  }
+  
+  try {
+    const config = await loadOrgConfig();
+    const org = config.orgs.find(o => o.id === orgId);
+    
+    if (!org) {
+      return res.status(404).json({ 
+        error: 'Not found',
+        message: `Organization ${orgId} not found`
+      });
+    }
+    
+    console.log(`Testing screenshot for org: ${org.name}`);
+    
+    // Launch browser and take screenshot
+    const browser = await acquireBrowser();
+    const context = await browser.newContext({
+      viewport: { width: 1366, height: 768 },
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    });
+    const page = await context.newPage();
+    
+    try {
+      console.log(`Navigating to: ${org.url}`);
+      await page.goto(org.url, { waitUntil: 'networkidle', timeout: 30000 });
+      
+      console.log('Taking test screenshot...');
+      const screenshot = await page.screenshot({ 
+        encoding: 'base64',
+        fullPage: true,
+        type: 'png'
+      });
+      
+      const screenshotData = `data:image/png;base64,${screenshot}`;
+      console.log(`Test screenshot captured: ${screenshot.length} bytes`);
+      
+      // Send via status update
+      broadcastStatus(sessionId, {
+        type: 'status',
+        orgId: org.id,
+        upgradeId: 'test-screenshot',
+        status: 'error',
+        message: 'Test screenshot captured successfully',
+        screenshot: screenshotData
+      });
+      
+      res.json({ 
+        message: 'Test screenshot captured and sent',
+        screenshotSize: screenshot.length,
+        orgName: org.name
+      });
+      
+    } finally {
+      await context.close();
+      await releaseBrowser(browser);
+    }
+    
+  } catch (error) {
+    console.error('Error capturing test screenshot:', error);
+    res.status(500).json({ 
+      error: 'Server error',
+      message: error.message
     });
   }
 }));
