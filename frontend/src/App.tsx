@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 
 // Configuration
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5001';
+const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8080';
 const API_KEY = process.env.REACT_APP_API_KEY || '';
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 1000;
@@ -22,16 +22,27 @@ interface StatusUpdate {
           'navigating-package' | 'finding-upgrade-button' | 'upgrading' | 'completed' | 'error';
   message: string;
   screenshot?: string;
+  timestamp?: number;
 }
 
 interface BatchStatus {
   type: 'batch-status';
   batchId: string;
-  status: 'started' | 'completed';
+  status: 'started' | 'completed' | 'error';
   totalOrgs?: number;
   successCount?: number;
   failureCount?: number;
   message: string;
+  results?: Array<{
+    orgId: string;
+    orgName: string;
+    status: string;
+    error?: string;
+    duration?: number;
+  }>;
+  startTime?: string;
+  endTime?: string;
+  totalDuration?: number;
 }
 
 interface BatchProgress {
@@ -44,6 +55,7 @@ interface BatchProgress {
   total: number;
   successCount?: number;
   failureCount?: number;
+  percentComplete?: number;
 }
 
 interface HistoryEntry {
@@ -58,6 +70,14 @@ interface HistoryEntry {
   status: 'in-progress' | 'success' | 'failed' | 'timeout';
   error: string | null;
   screenshot?: string | null;
+  retries?: number;
+}
+
+interface HistoryResponse {
+  upgrades: HistoryEntry[];
+  total: number;
+  limit: number;
+  offset: number;
 }
 
 type TabType = 'single' | 'batch' | 'history';
@@ -99,7 +119,7 @@ const useApiCall = () => {
       const error = err as Error;
       
       // Retry logic for network errors
-      if (retries > 0 && error.message.includes('Failed to fetch')) {
+      if (retries > 0 && (error.message.includes('Failed to fetch') || error.message.includes('NetworkError'))) {
         console.log(`Retrying API call... (${retries} retries left)`);
         await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
         return callApi(url, options, retries - 1);
@@ -124,14 +144,19 @@ const App: React.FC = () => {
   const [isUpgrading, setIsUpgrading] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<TabType>('single');
   const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [historyTotal, setHistoryTotal] = useState<number>(0);
+  const [historyOffset, setHistoryOffset] = useState<number>(0);
   const [sessionId] = useState<string>(`session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`);
   const eventSourceRef = useRef<EventSource | null>(null);
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const [useSSE, setUseSSE] = useState<boolean>(true);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'error'>('connecting');
   const { callApi, loading, error: apiError, setLoading, setError: setApiError } = useApiCall();
 
   const [showScreenshot, setShowScreenshot] = useState<string | null>(null);
+  const [lastHeartbeat, setLastHeartbeat] = useState<number>(Date.now());
+  const [activeBrowserCount, setActiveBrowserCount] = useState<number>(0);
 
   // Fetch orgs on mount
   useEffect(() => {
@@ -146,27 +171,54 @@ const App: React.FC = () => {
     };
   }, []);
 
+  // Monitor connection health
+  useEffect(() => {
+    const checkConnection = setInterval(() => {
+      if (isUpgrading && Date.now() - lastHeartbeat > 60000) {
+        setConnectionStatus('error');
+        setConnectionError('Connection lost - no heartbeat received');
+      }
+    }, 30000);
+
+    return () => clearInterval(checkConnection);
+  }, [isUpgrading, lastHeartbeat]);
+
   const fetchOrgs = async () => {
     try {
       setLoading(true);
+      setConnectionStatus('connecting');
       const data = await callApi(`${API_URL}/api/orgs`);
       setOrgs(data);
       setConnectionError(null);
+      setConnectionStatus('connected');
     } catch (error) {
       console.error('Error fetching orgs:', error);
       setConnectionError('Failed to connect to backend. Please check if the server is running.');
+      setConnectionStatus('error');
     } finally {
       setLoading(false);
     }
   };
 
-  const fetchHistory = async () => {
+  const fetchHistory = async (offset: number = 0, limit: number = 50) => {
     try {
-      const data = await callApi(`${API_URL}/api/history`);
-      setHistory(data);
+      const data: HistoryResponse = await callApi(`${API_URL}/api/history?offset=${offset}&limit=${limit}`);
+      if (offset === 0) {
+        setHistory(data.upgrades);
+      } else {
+        setHistory(prev => [...prev, ...data.upgrades]);
+      }
+      setHistoryTotal(data.total);
+      setHistoryOffset(offset + data.upgrades.length);
     } catch (error) {
       console.error('Error fetching history:', error);
       // Don't show error for history, it's not critical
+    }
+  };
+
+  const loadMoreHistory = () => {
+    if (history.length < historyTotal) {
+      fetchHistory(historyOffset);
     }
   };
 
@@ -176,6 +228,7 @@ const App: React.FC = () => {
 
   const startStatusUpdates = () => {
     setConnectionError(null);
+    setConnectionStatus('connecting');
     
     if (useSSE && typeof EventSource !== 'undefined') {
       try {
@@ -197,6 +250,7 @@ const App: React.FC = () => {
 
         eventSourceRef.current.onerror = (error) => {
           console.log('SSE error, falling back to polling');
+          setConnectionStatus('error');
           eventSourceRef.current?.close();
           setUseSSE(false);
           startPolling();
@@ -205,6 +259,7 @@ const App: React.FC = () => {
         eventSourceRef.current.onopen = () => {
           console.log('SSE connection established');
           setConnectionError(null);
+          setConnectionStatus('connected');
         };
       } catch (error) {
         console.log('SSE not supported, using polling');
@@ -218,6 +273,7 @@ const App: React.FC = () => {
 
   const startPolling = () => {
     let errorCount = 0;
+    setConnectionStatus('connecting');
     
     pollingIntervalRef.current = setInterval(async () => {
       try {
@@ -229,16 +285,18 @@ const App: React.FC = () => {
         
         errorCount = 0; // Reset error count on success
         setConnectionError(null);
+        setConnectionStatus('connected');
       } catch (error) {
         errorCount++;
         console.error('Polling error:', error);
         
         if (errorCount > 3) {
           setConnectionError('Lost connection to server. Please refresh the page.');
+          setConnectionStatus('error');
           stopStatusUpdates();
         }
       }
-    }, 1000);
+    }, 2000); // Slightly slower polling to reduce server load
   };
 
   const stopStatusUpdates = () => {
@@ -250,10 +308,21 @@ const App: React.FC = () => {
       clearInterval(pollingIntervalRef.current);
       pollingIntervalRef.current = null;
     }
+    setConnectionStatus('disconnected');
   };
 
   const handleStatusUpdate = (data: any) => {
     try {
+      // Update heartbeat timestamp
+      if (data.type === 'heartbeat' || data.timestamp) {
+        setLastHeartbeat(Date.now());
+      }
+
+      if (data.type === 'connected') {
+        setConnectionStatus('connected');
+        return;
+      }
+
       if (data.type === 'status') {
         setStatus(prev => ({
           ...prev,
@@ -268,17 +337,29 @@ const App: React.FC = () => {
             setIsUpgrading(false);
             stopStatusUpdates();
           }
-          setTimeout(fetchHistory, 1000);
+          // Refresh history after a short delay
+          setTimeout(() => fetchHistory(0), 1000);
         }
       } else if (data.type === 'batch-status') {
         setBatchStatus(data);
-        if (data.status === 'completed') {
+        if (data.status === 'completed' || data.status === 'error') {
           setIsUpgrading(false);
           setBatchProgress(null);
           stopStatusUpdates();
+          // Refresh history after completion
+          setTimeout(() => fetchHistory(0), 1000);
         }
       } else if (data.type === 'batch-progress') {
         setBatchProgress(data);
+      } else if (data.type === 'screenshot') {
+        // Handle separate screenshot data
+        setStatus(prev => ({
+          ...prev,
+          [data.orgId]: {
+            ...prev[data.orgId],
+            screenshot: data.screenshot
+          }
+        }));
       }
     } catch (error) {
       console.error('Error handling status update:', error);
@@ -308,7 +389,7 @@ const App: React.FC = () => {
     startStatusUpdates();
     
     try {
-      await callApi(`${API_URL}/api/upgrade`, {
+      const response = await callApi(`${API_URL}/api/upgrade`, {
         method: 'POST',
         body: JSON.stringify({
           orgId: selectedOrg,
@@ -316,6 +397,7 @@ const App: React.FC = () => {
           sessionId: sessionId
         }),
       });
+      console.log('Upgrade started:', response);
     } catch (error) {
       console.error('Error starting upgrade:', error);
       setIsUpgrading(false);
@@ -341,6 +423,11 @@ const App: React.FC = () => {
       return;
     }
 
+    if (selectedOrgs.length > 50) {
+      alert('Maximum 50 organizations allowed per batch');
+      return;
+    }
+
     const confirmMessage = `Are you sure you want to upgrade ${selectedOrgs.length} organization(s)? This process cannot be stopped once started.`;
     if (!window.confirm(confirmMessage)) {
       return;
@@ -354,7 +441,7 @@ const App: React.FC = () => {
     startStatusUpdates();
     
     try {
-      await callApi(`${API_URL}/api/upgrade-batch`, {
+      const response = await callApi(`${API_URL}/api/upgrade-batch`, {
         method: 'POST',
         body: JSON.stringify({
           orgIds: selectedOrgs,
@@ -363,6 +450,7 @@ const App: React.FC = () => {
           sessionId: sessionId
         }),
       });
+      console.log('Batch upgrade started:', response);
     } catch (error) {
       console.error('Error starting batch upgrade:', error);
       setIsUpgrading(false);
@@ -398,7 +486,8 @@ const App: React.FC = () => {
       case 'upgrading': return 'text-blue-600';
       case 'timeout': return 'text-orange-600';
       case 'verification-required': return 'text-purple-600';
-      default: return 'text-yellow-600';
+      case 'in-progress': return 'text-yellow-600';
+      default: return 'text-gray-600';
     }
   };
 
@@ -411,6 +500,7 @@ const App: React.FC = () => {
       case 'upgrading': return '🔄';
       case 'timeout': return '⚠️';
       case 'verification-required': return '🔐';
+      case 'in-progress': return '⏳';
       default: return '⏳';
     }
   };
@@ -427,6 +517,26 @@ const App: React.FC = () => {
       return new Date(dateString).toLocaleString();
     } catch {
       return dateString;
+    }
+  };
+
+  const getConnectionStatusColor = (): string => {
+    switch (connectionStatus) {
+      case 'connected': return 'text-green-600';
+      case 'connecting': return 'text-yellow-600';
+      case 'disconnected': return 'text-gray-600';
+      case 'error': return 'text-red-600';
+      default: return 'text-gray-600';
+    }
+  };
+
+  const getConnectionStatusIcon = (): string => {
+    switch (connectionStatus) {
+      case 'connected': return '🟢';
+      case 'connecting': return '🟡';
+      case 'disconnected': return '⚪';
+      case 'error': return '🔴';
+      default: return '⚪';
     }
   };
 
@@ -455,7 +565,7 @@ const App: React.FC = () => {
     return null;
   };
 
-  // Screenshot Modal Component - MOVED HERE so it's in the correct scope
+  // Screenshot Modal Component
   const ScreenshotModal = ({ screenshot, onClose }: { screenshot: string; onClose: () => void }) => (
     <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4" onClick={onClose}>
       <div className="bg-white rounded-lg max-w-6xl max-h-[90vh] overflow-hidden" onClick={(e) => e.stopPropagation()}>
@@ -468,7 +578,7 @@ const App: React.FC = () => {
             ×
           </button>
         </div>
-        <div className="p-4 overflow-auto">
+        <div className="p-4 overflow-auto max-h-[calc(90vh-8rem)]">
           <img src={screenshot} alt="Error screenshot" className="max-w-full h-auto" />
         </div>
         <div className="p-4 border-t">
@@ -486,9 +596,23 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen bg-gray-100 p-8">
       <div className="max-w-6xl mx-auto">
-        <h1 className="text-3xl font-bold text-gray-800 mb-8">
-          Salesforce Package Upgrade Automation
-        </h1>
+        <div className="flex justify-between items-center mb-8">
+          <h1 className="text-3xl font-bold text-gray-800">
+            Salesforce Package Upgrade Automation
+          </h1>
+          
+          {/* Connection Status Indicator */}
+          <div className="flex items-center space-x-2">
+            <span className={`text-sm font-medium ${getConnectionStatusColor()}`}>
+              {getConnectionStatusIcon()} {connectionStatus}
+            </span>
+            {isUpgrading && (
+              <span className="text-xs text-gray-500">
+                (Session: {sessionId.split('-')[1]})
+              </span>
+            )}
+          </div>
+        </div>
 
         <ConnectionStatus />
         {apiError && <ErrorAlert message={apiError} />}
@@ -513,7 +637,7 @@ const App: React.FC = () => {
                 : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
             }`}
           >
-            Batch Upgrade
+            Batch Upgrade ({selectedOrgs.length} selected)
           </button>
           <button
             onClick={() => setActiveTab('history')}
@@ -523,7 +647,7 @@ const App: React.FC = () => {
                 : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
             }`}
           >
-            History
+            History ({historyTotal})
           </button>
         </div>
 
@@ -599,6 +723,7 @@ const App: React.FC = () => {
                   <li>Package ID must be exactly 15 characters starting with "04t"</li>
                   <li>Each upgrade typically takes 2-5 minutes to complete</li>
                   <li>Cloud Run has a 5-minute timeout limit per request</li>
+                  <li>Screenshots are captured automatically on errors for debugging</li>
                 </ul>
               </div>
             </div>
@@ -680,7 +805,7 @@ const App: React.FC = () => {
 
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-2">
-                        Concurrent Upgrades
+                        Processing Mode
                       </label>
                       <select
                         value={maxConcurrent}
@@ -688,24 +813,31 @@ const App: React.FC = () => {
                         className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                         disabled={isUpgrading}
                       >
-                        <option value={1}>1 (Sequential - Recommended for Cloud Run)</option>
-                        <option value={2}>2 (Use only with higher memory allocation)</option>
+                        <option value={1}>Sequential (Recommended for Cloud Run)</option>
+                        <option value={2}>2 Concurrent (Higher resource usage)</option>
                       </select>
                       <p className="text-xs text-gray-500 mt-1">
-                        Cloud Run free tier works best with sequential processing
+                        Sequential processing is more reliable with limited resources
+                      </p>
+                    </div>
+
+                    <div className="bg-yellow-50 border border-yellow-200 rounded p-3">
+                      <p className="text-sm text-yellow-800">
+                        <strong>Batch Limits:</strong> Maximum 50 organizations per batch. 
+                        Estimated time: {selectedOrgs.length * 3}-{selectedOrgs.length * 5} minutes
                       </p>
                     </div>
 
                     <button
                       onClick={handleBatchUpgrade}
-                      disabled={isUpgrading || selectedOrgs.length === 0 || !packageUrl || !validatePackageId(packageUrl) || loading}
+                      disabled={isUpgrading || selectedOrgs.length === 0 || !packageUrl || !validatePackageId(packageUrl) || loading || selectedOrgs.length > 50}
                       className={`w-full py-2 px-4 rounded-md font-medium transition-colors ${
-                        isUpgrading || selectedOrgs.length === 0 || !packageUrl || !validatePackageId(packageUrl) || loading
+                        isUpgrading || selectedOrgs.length === 0 || !packageUrl || !validatePackageId(packageUrl) || loading || selectedOrgs.length > 50
                           ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
                           : 'bg-blue-600 text-white hover:bg-blue-700'
                       }`}
                     >
-                      {isUpgrading ? `Upgrading ${selectedOrgs.length} orgs...` : `Start Batch Upgrade (${selectedOrgs.length} orgs)`}
+                      {isUpgrading ? `Processing ${selectedOrgs.length} orgs...` : `Start Batch Upgrade (${selectedOrgs.length} orgs)`}
                     </button>
                   </div>
                 </div>
@@ -713,7 +845,7 @@ const App: React.FC = () => {
               
               <div className="lg:w-1/2">
                 <div className="bg-gray-50 rounded-lg shadow-md p-6">
-                  <h3 className="font-semibold text-gray-800 mb-3">Important Notes</h3>
+                  <h3 className="font-semibold text-gray-800 mb-3">Batch Upgrade Notes</h3>
                   <ul className="list-disc list-inside space-y-1 text-sm text-gray-600">
                     <li>Batch upgrades process orgs sequentially by default</li>
                     <li>Higher concurrency speeds up processing but uses more resources</li>
@@ -721,6 +853,8 @@ const App: React.FC = () => {
                     <li>You cannot stop a batch once started</li>
                     <li>Failed orgs won't affect others in the batch</li>
                     <li>Check the history tab for detailed results</li>
+                    <li>Screenshots are captured for failed upgrades</li>
+                    <li>Maximum 50 organizations per batch for resource management</li>
                   </ul>
                 </div>
               </div>
@@ -732,7 +866,7 @@ const App: React.FC = () => {
                 <h3 className="font-medium text-blue-900 mb-2">Batch Progress</h3>
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-sm text-blue-700">
-                    Processing {maxConcurrent > 1 ? `up to ${maxConcurrent} orgs in parallel` : 'sequentially'}
+                    {batchProgress.orgName ? `Processing: ${batchProgress.orgName}` : 'Processing batch...'}
                   </span>
                   <span className="text-sm font-medium text-blue-900">
                     {batchProgress.completed} of {batchProgress.total} completed
@@ -745,11 +879,12 @@ const App: React.FC = () => {
                   />
                 </div>
                 {batchProgress.successCount !== undefined && batchProgress.failureCount !== undefined && (
-                  <div className="text-sm text-blue-700">
+                  <div className="text-sm text-blue-700 flex justify-between">
                     <span className="text-green-600">✅ {batchProgress.successCount} succeeded</span>
                     {batchProgress.failureCount > 0 && (
-                      <span className="ml-4 text-red-600">❌ {batchProgress.failureCount} failed</span>
+                      <span className="text-red-600">❌ {batchProgress.failureCount} failed</span>
                     )}
+                    <span className="text-blue-600">{Math.round((batchProgress.completed / batchProgress.total) * 100)}% complete</span>
                   </div>
                 )}
               </div>
@@ -760,24 +895,48 @@ const App: React.FC = () => {
               <div className={`rounded-lg p-4 mb-6 ${
                 batchStatus.status === 'completed' 
                   ? 'bg-green-50 border border-green-200' 
+                  : batchStatus.status === 'error'
+                  ? 'bg-red-50 border border-red-200'
                   : 'bg-yellow-50 border border-yellow-200'
               }`}>
                 <h3 className={`font-medium mb-2 ${
-                  batchStatus.status === 'completed' ? 'text-green-900' : 'text-yellow-900'
+                  batchStatus.status === 'completed' ? 'text-green-900' : 
+                  batchStatus.status === 'error' ? 'text-red-900' : 'text-yellow-900'
                 }`}>
-                  Batch Status
+                  Batch Status: {batchStatus.status}
                 </h3>
                 <p className={`text-sm ${
-                  batchStatus.status === 'completed' ? 'text-green-700' : 'text-yellow-700'
+                  batchStatus.status === 'completed' ? 'text-green-700' : 
+                  batchStatus.status === 'error' ? 'text-red-700' : 'text-yellow-700'
                 }`}>
                   {batchStatus.message}
                 </p>
                 {batchStatus.status === 'completed' && batchStatus.successCount !== undefined && (
-                  <div className="mt-2 text-sm">
-                    <span className="text-green-600">✅ Success: {batchStatus.successCount}</span>
-                    {batchStatus.failureCount! > 0 && (
-                      <span className="ml-4 text-red-600">❌ Failed: {batchStatus.failureCount}</span>
+                  <div className="mt-2 text-sm space-y-1">
+                    <div className="flex justify-between">
+                      <span className="text-green-600">✅ Success: {batchStatus.successCount}</span>
+                      {batchStatus.failureCount! > 0 && (
+                        <span className="text-red-600">❌ Failed: {batchStatus.failureCount}</span>
+                      )}
+                    </div>
+                    {batchStatus.totalDuration && (
+                      <p className="text-gray-600">Total duration: {formatDuration(batchStatus.totalDuration)}</p>
                     )}
+                  </div>
+                )}
+                {batchStatus.results && batchStatus.results.length > 0 && (
+                  <div className="mt-3 max-h-32 overflow-y-auto">
+                    <h4 className="text-sm font-medium mb-1">Results:</h4>
+                    <div className="space-y-1">
+                      {batchStatus.results.map((result, index) => (
+                        <div key={index} className="text-xs flex justify-between items-center">
+                          <span>{result.orgName}</span>
+                          <span className={`${result.status === 'success' ? 'text-green-600' : 'text-red-600'}`}>
+                            {result.status === 'success' ? '✅' : '❌'} {result.duration ? formatDuration(result.duration) : ''}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>
@@ -789,9 +948,9 @@ const App: React.FC = () => {
         {activeTab === 'history' && (
           <div className="bg-white rounded-lg shadow-md p-6">
             <div className="flex justify-between items-center mb-4">
-              <h2 className="text-xl font-semibold">Upgrade History</h2>
+              <h2 className="text-xl font-semibold">Upgrade History ({historyTotal} total)</h2>
               <button
-                onClick={fetchHistory}
+                onClick={() => fetchHistory(0)}
                 className="text-sm text-blue-600 hover:text-blue-800"
                 disabled={loading}
               >
@@ -802,130 +961,160 @@ const App: React.FC = () => {
             {history.length === 0 ? (
               <p className="text-gray-500">No upgrade history available</p>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-gray-200">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Time
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Org
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Package ID
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Duration
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Status
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Type
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="bg-white divide-y divide-gray-200">
-                    {history.map((entry) => (
-                      <tr key={entry.id} className="hover:bg-gray-50">
-                        <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">
-                          {formatDate(entry.startTime)}
-                        </td>
-                        <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">
-                          {entry.orgName}
-                        </td>
-                        <td className="px-4 py-4 text-sm text-gray-900 max-w-xs truncate" title={entry.packageUrl}>
-                          {entry.packageUrl}
-                        </td>
-                        <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">
-                          {formatDuration(entry.duration)}
-                        </td>
-                        <td className="px-4 py-4 whitespace-nowrap">
-                          <span className={`inline-flex items-center text-sm font-medium ${getStatusColor(entry.status)}`}>
-                            {getStatusIcon(entry.status)} {entry.status}
-                          </span>
-                          {entry.error && (
-                            <div>
-                              <p className="text-xs text-red-600 mt-1" title={entry.error}>
-                                {entry.error.substring(0, 50)}...
-                              </p>
-                              {entry.screenshot && (
-                                <button
-                                  onClick={() => setShowScreenshot(entry.screenshot!)}
-                                  className="text-xs text-blue-600 hover:text-blue-800 underline mt-1"
-                                >
-                                  View Screenshot
-                                </button>
-                              )}
-                            </div>
-                          )}
-                        </td>
-                        <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500">
-                          {entry.batchId ? 'Batch' : 'Single'}
-                        </td>
+              <>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Time
+                        </th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Org
+                        </th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Package ID
+                        </th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Duration
+                        </th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Status
+                        </th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Type
+                        </th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {history.map((entry) => (
+                        <tr key={entry.id} className="hover:bg-gray-50">
+                          <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">
+                            {formatDate(entry.startTime)}
+                          </td>
+                          <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">
+                            <div>
+                              <div className="font-medium">{entry.orgName}</div>
+                              <div className="text-xs text-gray-500">{entry.orgId}</div>
+                            </div>
+                          </td>
+                          <td className="px-4 py-4 text-sm text-gray-900 max-w-xs">
+                            <span className="font-mono text-xs">{entry.packageUrl}</span>
+                          </td>
+                          <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">
+                            {formatDuration(entry.duration)}
+                            {entry.retries && entry.retries > 0 && (
+                              <div className="text-xs text-orange-600">
+                                {entry.retries} retries
+                              </div>
+                            )}
+                          </td>
+                          <td className="px-4 py-4 whitespace-nowrap">
+                            <span className={`inline-flex items-center text-sm font-medium ${getStatusColor(entry.status)}`}>
+                              {getStatusIcon(entry.status)} {entry.status}
+                            </span>
+                            {entry.error && (
+                              <div className="mt-1">
+                                <p className="text-xs text-red-600" title={entry.error}>
+                                  {entry.error.length > 50 ? `${entry.error.substring(0, 50)}...` : entry.error}
+                                </p>
+                                {entry.screenshot && (
+                                  <button
+                                    onClick={() => setShowScreenshot(entry.screenshot!)}
+                                    className="text-xs text-blue-600 hover:text-blue-800 underline mt-1"
+                                  >
+                                    View Screenshot
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                          </td>
+                          <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500">
+                            <span className={`px-2 py-1 text-xs rounded-full ${
+                              entry.batchId ? 'bg-purple-100 text-purple-800' : 'bg-gray-100 text-gray-800'
+                            }`}>
+                              {entry.batchId ? 'Batch' : 'Single'}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                
+                {/* Load More Button */}
+                {history.length < historyTotal && (
+                  <div className="mt-4 text-center">
+                    <button
+                      onClick={loadMoreHistory}
+                      className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-gray-300"
+                      disabled={loading}
+                    >
+                      {loading ? 'Loading...' : `Load More (${historyTotal - history.length} remaining)`}
+                    </button>
+                  </div>
+                )}
+              </>
             )}
           </div>
         )}
 
         {/* Status Panel - Show for both single and batch */}
-        {(activeTab === 'single' || activeTab === 'batch') && (
+        {(activeTab === 'single' || activeTab === 'batch') && Object.keys(status).length > 0 && (
           <div className="bg-white rounded-lg shadow-md p-6 mt-6">
             <h2 className="text-xl font-semibold mb-4">Automation Status</h2>
             
-            {Object.keys(status).length === 0 ? (
-              <p className="text-gray-500">No upgrades in progress</p>
-            ) : (
-              <div className="space-y-3">
-                {Object.entries(status).map(([orgId, orgStatus]) => {
-                  const org = orgs.find(o => o.id === orgId);
-                  return (
-                    <div key={orgId} className="border border-gray-200 rounded-lg p-4">
-                      <div className="flex items-center justify-between mb-2">
-                        <h3 className="font-medium">{org?.name || orgId}</h3>
-                        <span className={`text-sm font-medium ${getStatusColor(orgStatus.status)}`}>
-                          {getStatusIcon(orgStatus.status)} {orgStatus.status}
-                        </span>
-                      </div>
-                      <p className="text-sm text-gray-600">{orgStatus.message}</p>
-                      {orgStatus.status === 'verification-required' && (
-                        <p className="text-xs text-purple-600 mt-2">
-                          ⚠️ Manual action required: Please complete verification in the browser window
-                        </p>
-                      )}
-                      {orgStatus.status === 'error' && orgStatus.screenshot && (
-                        <button
-                          onClick={() => setShowScreenshot(orgStatus.screenshot!)}
-                          className="mt-2 text-xs text-blue-600 hover:text-blue-800 underline"
-                        >
-                          View Screenshot
-                        </button>
-                      )}
-                      {orgStatus.status === 'error' && !orgStatus.screenshot && (
-                        <p className="text-xs text-gray-500 mt-2">
-                          (No screenshot available)
-                        </p>
-                      )}
+            <div className="space-y-3">
+              {Object.entries(status).map(([orgId, orgStatus]) => {
+                const org = orgs.find(o => o.id === orgId);
+                return (
+                  <div key={orgId} className="border border-gray-200 rounded-lg p-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <h3 className="font-medium">{org?.name || orgId}</h3>
+                      <span className={`text-sm font-medium ${getStatusColor(orgStatus.status)}`}>
+                        {getStatusIcon(orgStatus.status)} {orgStatus.status}
+                      </span>
                     </div>
-                  );
-                })}
-              </div>
-            )}
+                    <p className="text-sm text-gray-600">{orgStatus.message}</p>
+                    {orgStatus.status === 'verification-required' && (
+                      <p className="text-xs text-purple-600 mt-2">
+                        ⚠️ Manual action required: Please complete verification in the browser window
+                      </p>
+                    )}
+                    {orgStatus.status === 'error' && orgStatus.screenshot && (
+                      <button
+                        onClick={() => setShowScreenshot(orgStatus.screenshot!)}
+                        className="mt-2 text-xs text-blue-600 hover:text-blue-800 underline"
+                      >
+                        View Error Screenshot
+                      </button>
+                    )}
+                    {orgStatus.timestamp && (
+                      <p className="text-xs text-gray-400 mt-2">
+                        Last updated: {new Date(orgStatus.timestamp).toLocaleTimeString()}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
 
-        {API_URL !== 'http://localhost:5001' && (
-          <div className="mt-6 p-3 bg-green-50 border border-green-200 rounded">
-            <p className="text-green-800 text-xs">
-              <strong>Connected to:</strong> {API_URL}
-            </p>
+        {/* Footer with API URL and Version */}
+        <div className="mt-8 p-4 bg-gray-50 rounded-lg">
+          <div className="flex justify-between items-center text-sm text-gray-600">
+            <div>
+              <strong>Backend:</strong> {API_URL}
+              {API_KEY && <span className="ml-2 text-green-600">🔐 Authenticated</span>}
+            </div>
+            <div className="flex items-center space-x-4">
+              <span>Connection: {useSSE ? 'Server-Sent Events' : 'Polling'}</span>
+              <span>Active Browsers: {activeBrowserCount || 0}</span>
+              <span>Version: 1.0.1</span>
+            </div>
           </div>
-        )}
+        </div>
 
         {/* Screenshot Modal */}
         {showScreenshot && (

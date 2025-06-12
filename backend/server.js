@@ -35,8 +35,10 @@ const corsOptions = {
   origin: (origin, callback) => {
     const allowedOrigins = [
       'http://localhost:3000',
+      'http://localhost:3001',
       config.frontend_url,
-      /https:\/\/.*\.vercel\.app$/
+      /https:\/\/.*\.vercel\.app$/,
+      /https:\/\/.*\.netlify\.app$/
     ];
     
     // Allow requests with no origin (like mobile apps or curl)
@@ -63,7 +65,8 @@ app.use(express.json({ limit: MAX_REQUEST_SIZE }));
 // Request logging middleware
 app.use((req, res, next) => {
   const start = Date.now();
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] ${req.method} ${req.path} - IP: ${req.ip || 'unknown'}`);
   
   res.on('finish', () => {
     const duration = Date.now() - start;
@@ -169,7 +172,12 @@ function validateOrgConfig(config) {
 async function loadHistory() {
   try {
     const data = await fs.readFile(HISTORY_LOG_PATH, 'utf8');
-    return JSON.parse(data);
+    const history = JSON.parse(data);
+    // Ensure upgrades array exists
+    if (!history.upgrades) {
+      history.upgrades = [];
+    }
+    return history;
   } catch (error) {
     return { upgrades: [] };
   }
@@ -182,7 +190,7 @@ async function saveHistory(history) {
     await fs.mkdir(dir, { recursive: true });
     
     // Limit history size
-    if (history.upgrades.length > MAX_HISTORY_ENTRIES) {
+    if (history.upgrades && history.upgrades.length > MAX_HISTORY_ENTRIES) {
       history.upgrades = history.upgrades.slice(0, MAX_HISTORY_ENTRIES);
     }
     
@@ -196,6 +204,9 @@ async function saveHistory(history) {
 async function addToHistory(entry) {
   try {
     const history = await loadHistory();
+    if (!history.upgrades) {
+      history.upgrades = [];
+    }
     history.upgrades.unshift(entry);
     await saveHistory(history);
   } catch (error) {
@@ -209,29 +220,34 @@ function broadcastStatus(sessionId, data) {
     // Add timestamp
     data.timestamp = Date.now();
     
-    // Log screenshot status
-    if (data.screenshot) {
-      console.log(`Broadcasting status with screenshot for ${data.orgId}, size: ${data.screenshot.length}`);
+    // Log significant events
+    if (data.type === 'status' && (data.status === 'completed' || data.status === 'error')) {
+      console.log(`Status Update: ${data.orgId} - ${data.status}: ${data.message}`);
     }
     
-    // Send to SSE clients - might need to chunk large screenshots
+    // Send to SSE clients
     const client = sseClients.get(sessionId);
-    if (client && client.readyState === 1) {
-      // For very large screenshots, consider sending a separate event
-      if (data.screenshot && data.screenshot.length > 100000) {
-        // Send status without screenshot first
-        const statusWithoutScreenshot = { ...data };
-        delete statusWithoutScreenshot.screenshot;
-        client.write(`data: ${JSON.stringify(statusWithoutScreenshot)}\n\n`);
-        
-        // Then send screenshot separately
-        client.write(`data: ${JSON.stringify({ 
-          type: 'screenshot',
-          orgId: data.orgId,
-          screenshot: data.screenshot 
-        })}\n\n`);
-      } else {
-        client.write(`data: ${JSON.stringify(data)}\n\n`);
+    if (client && !client.destroyed) {
+      try {
+        // For very large screenshots, send separately
+        if (data.screenshot && data.screenshot.length > 100000) {
+          // Send status without screenshot first
+          const statusWithoutScreenshot = { ...data };
+          delete statusWithoutScreenshot.screenshot;
+          client.write(`data: ${JSON.stringify(statusWithoutScreenshot)}\n\n`);
+          
+          // Then send screenshot separately
+          client.write(`data: ${JSON.stringify({ 
+            type: 'screenshot',
+            orgId: data.orgId,
+            screenshot: data.screenshot 
+          })}\n\n`);
+        } else {
+          client.write(`data: ${JSON.stringify(data)}\n\n`);
+        }
+      } catch (writeError) {
+        console.error('Error writing to SSE client:', writeError.message);
+        sseClients.delete(sessionId);
       }
     }
     
@@ -249,7 +265,7 @@ function broadcastStatus(sessionId, data) {
   }
 }
 
-// Browser management
+// Browser management with improved error handling
 async function acquireBrowser() {
   if (activeBrowserCount >= MAX_CONCURRENT_BROWSERS) {
     throw new Error('Maximum concurrent browser limit reached. Please try again later.');
@@ -272,11 +288,14 @@ async function acquireBrowser() {
         '--disable-blink-features=AutomationControlled',
         '--disable-web-security',
         '--disable-features=IsolateOrigins,site-per-process',
-        '--disable-site-isolation-trials'
+        '--disable-site-isolation-trials',
+        '--memory-pressure-off',
+        '--max_old_space_size=512'
       ],
       timeout: BROWSER_LAUNCH_TIMEOUT
     });
     
+    console.log(`Browser launched. Active browsers: ${activeBrowserCount}`);
     return browser;
   } catch (error) {
     activeBrowserCount--;
@@ -289,10 +308,11 @@ async function releaseBrowser(browser) {
   
   try {
     await browser.close();
+    console.log(`Browser closed. Active browsers: ${activeBrowserCount - 1}`);
   } catch (error) {
     console.error('Error closing browser:', error);
   } finally {
-    activeBrowserCount--;
+    activeBrowserCount = Math.max(0, activeBrowserCount - 1);
   }
 }
 
@@ -301,18 +321,19 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy',
     timestamp: new Date().toISOString(),
-    version: '1.0.0',
+    version: '1.0.1',
     environment: config.node_env,
     memory: process.memoryUsage(),
     activeBrowsers: activeBrowserCount,
-    activeClients: sseClients.size
+    activeClients: sseClients.size,
+    uptime: process.uptime()
   });
 });
 
 app.get('/', (req, res) => {
   res.json({ 
     message: 'Salesforce Automation Backend',
-    version: '1.0.0',
+    version: '1.0.1',
     endpoints: [
       { path: '/health', method: 'GET', description: 'Health check' },
       { path: '/api/orgs', method: 'GET', description: 'List organizations' },
@@ -325,7 +346,7 @@ app.get('/', (req, res) => {
   });
 });
 
-// SSE endpoint with connection management
+// SSE endpoint with improved connection management
 app.get('/api/status-stream/:sessionId', authenticate, asyncHandler(async (req, res) => {
   const { sessionId } = req.params;
   
@@ -342,8 +363,10 @@ app.get('/api/status-stream/:sessionId', authenticate, asyncHandler(async (req, 
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
+  res.setHeader('Access-Control-Allow-Origin', '*');
   
   sseClients.set(sessionId, res);
+  console.log(`SSE client connected: ${sessionId}. Total clients: ${sseClients.size}`);
   
   // Send initial connection
   res.write(`data: ${JSON.stringify({ type: 'connected', timestamp: Date.now() })}\n\n`);
@@ -354,22 +377,27 @@ app.get('/api/status-stream/:sessionId', authenticate, asyncHandler(async (req, 
       clearInterval(heartbeat);
       return;
     }
-    res.write(`data: ${JSON.stringify({ type: 'heartbeat', timestamp: Date.now() })}\n\n`);
+    try {
+      res.write(`data: ${JSON.stringify({ type: 'heartbeat', timestamp: Date.now() })}\n\n`);
+    } catch (error) {
+      clearInterval(heartbeat);
+      sseClients.delete(sessionId);
+    }
   }, 30000);
   
   // Cleanup on disconnect
-  req.on('close', () => {
+  const cleanup = () => {
     clearInterval(heartbeat);
     sseClients.delete(sessionId);
-  });
+    console.log(`SSE client disconnected: ${sessionId}. Total clients: ${sseClients.size}`);
+  };
   
-  req.on('error', () => {
-    clearInterval(heartbeat);
-    sseClients.delete(sessionId);
-  });
+  req.on('close', cleanup);
+  req.on('error', cleanup);
+  res.on('close', cleanup);
 }));
 
-// Polling endpoint
+// Polling endpoint with improved error handling
 app.get('/api/status/:sessionId', authenticate, asyncHandler(async (req, res) => {
   const { sessionId } = req.params;
   
@@ -396,6 +424,7 @@ app.get('/api/orgs', authenticate, asyncHandler(async (req, res) => {
     const orgsWithoutPasswords = config.orgs.map(({ password, ...org }) => org);
     res.json(orgsWithoutPasswords);
   } catch (error) {
+    console.error('Error loading orgs:', error);
     res.status(500).json({ 
       error: 'Configuration error',
       message: error.message
@@ -403,13 +432,32 @@ app.get('/api/orgs', authenticate, asyncHandler(async (req, res) => {
   }
 }));
 
-// Get history
+// Get history with pagination
 app.get('/api/history', authenticate, asyncHandler(async (req, res) => {
-  const history = await loadHistory();
-  res.json(history.upgrades);
+  try {
+    const { limit = 50, offset = 0 } = req.query;
+    const history = await loadHistory();
+    
+    const startIndex = parseInt(offset);
+    const endIndex = startIndex + parseInt(limit);
+    const paginatedHistory = history.upgrades.slice(startIndex, endIndex);
+    
+    res.json({
+      upgrades: paginatedHistory,
+      total: history.upgrades.length,
+      limit: parseInt(limit),
+      offset: parseInt(offset)
+    });
+  } catch (error) {
+    console.error('Error fetching history:', error);
+    res.status(500).json({ 
+      error: 'Server error',
+      message: 'Failed to fetch history'
+    });
+  }
 }));
 
-// Single upgrade
+// Single upgrade with improved validation
 app.post('/api/upgrade', authenticate, validatePackageId, asyncHandler(async (req, res) => {
   const { orgId, packageUrl, sessionId } = req.body;
   
@@ -417,6 +465,13 @@ app.post('/api/upgrade', authenticate, validatePackageId, asyncHandler(async (re
     return res.status(400).json({ 
       error: 'Validation error',
       message: 'Missing required fields: orgId, sessionId'
+    });
+  }
+  
+  if (sessionId.length < 10) {
+    return res.status(400).json({ 
+      error: 'Validation error',
+      message: 'Invalid session ID format'
     });
   }
   
@@ -437,10 +492,11 @@ app.post('/api/upgrade', authenticate, validatePackageId, asyncHandler(async (re
       message: 'Upgrade process started',
       upgradeId,
       sessionId,
-      estimatedDuration: '2-5 minutes'
+      estimatedDuration: '2-5 minutes',
+      org: org.name
     });
     
-    // Run in background with error handling
+    // Run in background with comprehensive error handling
     upgradePackage(org, packageUrl, sessionId, upgradeId)
       .catch(error => {
         console.error(`Upgrade ${upgradeId} failed:`, error);
@@ -454,6 +510,7 @@ app.post('/api/upgrade', authenticate, validatePackageId, asyncHandler(async (re
       });
       
   } catch (error) {
+    console.error('Error starting upgrade:', error);
     res.status(500).json({ 
       error: 'Server error',
       message: error.message
@@ -461,7 +518,7 @@ app.post('/api/upgrade', authenticate, validatePackageId, asyncHandler(async (re
   }
 }));
 
-// Batch upgrade
+// Batch upgrade with improved validation and error handling
 app.post('/api/upgrade-batch', authenticate, validatePackageId, asyncHandler(async (req, res) => {
   const { orgIds, packageUrl, maxConcurrent = 1, sessionId } = req.body;
   
@@ -472,15 +529,22 @@ app.post('/api/upgrade-batch', authenticate, validatePackageId, asyncHandler(asy
     });
   }
   
-  if (!sessionId) {
+  if (!sessionId || sessionId.length < 10) {
     return res.status(400).json({ 
       error: 'Validation error',
-      message: 'Session ID is required'
+      message: 'Session ID is required and must be valid format'
+    });
+  }
+  
+  if (orgIds.length > 50) {
+    return res.status(400).json({ 
+      error: 'Validation error',
+      message: 'Maximum 50 organizations allowed per batch'
     });
   }
   
   // Limit concurrent for Cloud Run
-  const limitedConcurrent = Math.min(Math.max(1, maxConcurrent), 1);
+  const limitedConcurrent = Math.min(Math.max(1, maxConcurrent), 2);
   
   try {
     const config = await loadOrgConfig();
@@ -501,7 +565,8 @@ app.post('/api/upgrade-batch', authenticate, validatePackageId, asyncHandler(asy
       sessionId,
       orgsCount: orgsToUpgrade.length,
       maxConcurrent: limitedConcurrent,
-      estimatedDuration: `${orgsToUpgrade.length * 3}-${orgsToUpgrade.length * 5} minutes`
+      estimatedDuration: `${orgsToUpgrade.length * 3}-${orgsToUpgrade.length * 5} minutes`,
+      orgs: orgsToUpgrade.map(org => ({ id: org.id, name: org.name }))
     });
     
     // Run in background
@@ -517,6 +582,7 @@ app.post('/api/upgrade-batch', authenticate, validatePackageId, asyncHandler(asy
       });
       
   } catch (error) {
+    console.error('Error starting batch upgrade:', error);
     res.status(500).json({ 
       error: 'Server error',
       message: error.message
@@ -524,7 +590,7 @@ app.post('/api/upgrade-batch', authenticate, validatePackageId, asyncHandler(asy
   }
 }));
 
-// Batch upgrade implementation
+// Enhanced batch upgrade implementation
 async function runBatchUpgradeParallel(orgs, packageUrl, sessionId, batchId, maxConcurrent = 1) {
   const startTime = Date.now();
   
@@ -543,8 +609,10 @@ async function runBatchUpgradeParallel(orgs, packageUrl, sessionId, batchId, max
   let completedCount = 0;
   const results = [];
   
+  // Process orgs sequentially for better resource management
   for (const org of orgs) {
     const upgradeId = `${batchId}-${org.id}`;
+    const orgStartTime = Date.now();
     
     try {
       broadcastStatus(sessionId, {
@@ -565,7 +633,7 @@ async function runBatchUpgradeParallel(orgs, packageUrl, sessionId, batchId, max
         orgId: org.id, 
         orgName: org.name,
         status: 'success',
-        duration: Date.now() - startTime
+        duration: Math.round((Date.now() - orgStartTime) / 1000)
       });
       
     } catch (error) {
@@ -576,10 +644,16 @@ async function runBatchUpgradeParallel(orgs, packageUrl, sessionId, batchId, max
         orgName: org.name,
         status: 'failed', 
         error: error.message,
-        duration: Date.now() - startTime
+        duration: Math.round((Date.now() - orgStartTime) / 1000)
       });
     } finally {
       completedCount++;
+      
+      // Add small delay between orgs to reduce resource pressure
+      if (completedCount < orgs.length) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+      
       broadcastStatus(sessionId, {
         type: 'batch-progress',
         batchId,
@@ -609,7 +683,7 @@ async function runBatchUpgradeParallel(orgs, packageUrl, sessionId, batchId, max
   });
 }
 
-// Main upgrade function with comprehensive error handling
+// Enhanced main upgrade function
 async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = null) {
   let browser;
   let context;
@@ -652,14 +726,16 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         ignoreHTTPSErrors: true,
         locale: 'en-US',
-        timezoneId: 'America/New_York'
+        timezoneId: 'America/New_York',
+        httpCredentials: null
       });
       
       page = await context.newPage();
       
       // Set extra headers
       await page.setExtraHTTPHeaders({
-        'Accept-Language': 'en-US,en;q=0.9'
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
       });
       
       // Step 2: Navigate to org
@@ -681,7 +757,7 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
         throw new Error(`Failed to load ${org.name}: ${error.message}`);
       }
       
-      // Step 3: Login
+      // Step 3: Login with improved error handling
       broadcastStatus(sessionId, { 
         type: 'status',
         orgId: org.id,
@@ -692,32 +768,28 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       });
       
       try {
-        await page.waitForSelector('#username', { timeout: 10000 });
-      } catch (error) {
-        throw new Error('Login page not found - username field missing');
-      }
-      
-      await page.fill('#username', org.username);
-      await page.fill('#password', org.password);
-      
-      // Click login with retry
-      let loginClicked = false;
-      for (let i = 0; i < 3; i++) {
-        try {
-          await page.click('#Login');
-          loginClicked = true;
-          break;
-        } catch (error) {
-          if (i === 2) throw new Error('Failed to click login button after 3 attempts');
-          await page.waitForTimeout(1000);
+        await page.waitForSelector('#username', { timeout: 15000 });
+        await page.fill('#username', org.username);
+        await page.fill('#password', org.password);
+        
+        // Click login with improved retry logic
+        let loginClicked = false;
+        for (let i = 0; i < 3; i++) {
+          try {
+            await page.click('#Login');
+            loginClicked = true;
+            break;
+          } catch (error) {
+            if (i === 2) throw new Error('Failed to click login button after 3 attempts');
+            await page.waitForTimeout(1000);
+          }
         }
-      }
-      
-      // Wait for navigation after login
-      try {
+        
+        // Wait for navigation after login with better timeout
         await page.waitForLoadState('networkidle', { timeout: PAGE_LOAD_TIMEOUT });
+        
       } catch (error) {
-        throw new Error('Login failed - page did not load after credentials submission');
+        throw new Error(`Login failed: ${error.message}`);
       }
       
       broadcastStatus(sessionId, { 
@@ -765,7 +837,7 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
         throw new Error(`Failed to load package page: ${error.message}`);
       }
       
-      // Step 6: Find and click upgrade button
+      // Step 6: Find and click upgrade button with enhanced strategies
       broadcastStatus(sessionId, { 
         type: 'status',
         orgId: org.id,
@@ -779,9 +851,11 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       const buttonStrategies = [
         { selector: 'button[title="Upgrade"]', name: 'title="Upgrade"' },
         { selector: 'button:has-text("Upgrade")', name: 'text "Upgrade"' },
-        { selector: 'button.installButton', name: 'class installButton' },
         { selector: 'input[type="submit"][value="Upgrade"]', name: 'submit "Upgrade"' },
-        { selector: 'a.btn:has-text("Upgrade")', name: 'link "Upgrade"' }
+        { selector: 'button.installButton', name: 'class installButton' },
+        { selector: 'a.btn:has-text("Upgrade")', name: 'link "Upgrade"' },
+        { selector: '[name="upgradeButton"]', name: 'name upgradeButton' },
+        { selector: '.upgradeBtn', name: 'class upgradeBtn' }
       ];
       
       for (const strategy of buttonStrategies) {
@@ -813,12 +887,12 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
         try {
           const screenshot = await page.screenshot({ 
             encoding: 'base64',
-            fullPage: false, // Changed to viewport only to reduce size
-            type: 'jpeg', // Changed to JPEG for smaller size
-            quality: 80 // Reduce quality for smaller size
+            fullPage: false,
+            type: 'jpeg',
+            quality: 80
           });
           failureScreenshot = `data:image/jpeg;base64,${screenshot}`;
-          console.log('Screenshot captured:', screenshot.length, 'bytes');
+          console.log('Screenshot captured for debugging:', screenshot.length, 'bytes');
         } catch (e) {
           console.error('Failed to capture screenshot:', e.message);
         }
@@ -876,7 +950,7 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
           try {
             const screenshot = await page.screenshot({ 
               encoding: 'base64',
-              fullPage: false, // Viewport only
+              fullPage: false,
               type: 'jpeg',
               quality: 80
             });
@@ -944,7 +1018,8 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       if (retryCount < config.max_retries && 
           (error.message.includes('net::') || 
            error.message.includes('Page crashed') ||
-           error.message.includes('Target closed'))) {
+           error.message.includes('Target closed') ||
+           error.message.includes('timeout'))) {
         
         retryCount++;
         console.log(`Retrying upgrade for ${org.name} (attempt ${retryCount + 1}/${config.max_retries + 1})`);
@@ -1014,7 +1089,7 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
   return attemptUpgrade();
 }
 
-// Periodic cleanup
+// Periodic cleanup with improved logic
 setInterval(() => {
   const oneHourAgo = Date.now() - (60 * 60 * 1000);
   let cleaned = 0;
@@ -1038,6 +1113,10 @@ setInterval(() => {
   if (cleaned > 0) {
     console.log(`Cleanup: removed ${cleaned} stale entries`);
   }
+  
+  // Log memory usage
+  const memUsage = process.memoryUsage();
+  console.log(`Memory usage: RSS ${Math.round(memUsage.rss / 1024 / 1024)}MB, Heap ${Math.round(memUsage.heapUsed / 1024 / 1024)}MB`);
 }, CLEANUP_INTERVAL);
 
 // Global error handler
@@ -1057,6 +1136,14 @@ app.use((err, req, res, next) => {
     return res.status(400).json({
       error: 'Validation error',
       message: err.message
+    });
+  }
+  
+  // Handle timeout errors
+  if (err.message && err.message.includes('timeout')) {
+    return res.status(408).json({
+      error: 'Request timeout',
+      message: 'Operation timed out'
     });
   }
   
@@ -1137,6 +1224,7 @@ server = app.listen(PORT, '0.0.0.0', () => {
 ║ Environment: ${config.node_env.padEnd(38)}║
 ║ API Key:     ${(config.api_key ? 'Enabled' : 'Disabled').padEnd(38)}║
 ║ Frontend:    ${config.frontend_url.padEnd(38).substring(0, 38)}║
+║ Version:     1.0.1${' '.repeat(32)}║
 ╚════════════════════════════════════════════════════╝
   `);
 });
