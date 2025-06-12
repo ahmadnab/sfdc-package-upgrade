@@ -19,10 +19,26 @@ interface StatusUpdate {
   upgradeId?: string;
   batchId?: string;
   status: 'starting' | 'navigating' | 'logging-in' | 'logged-in' | 'verification-required' | 
-          'navigating-package' | 'finding-upgrade-button' | 'upgrading' | 'completed' | 'error';
+          'navigating-package' | 'extracting-version-info' | 'awaiting-confirmation' | 'user-confirmed' |
+          'finding-upgrade-button' | 'upgrading' | 'completed' | 'error';
   message: string;
   screenshot?: string;
   timestamp?: number;
+}
+
+interface VersionConfirmationUpdate {
+  type: 'version-confirmation-required';
+  orgId: string;
+  upgradeId: string;
+  batchId?: string;
+  status: 'awaiting-confirmation';
+  message: string;
+  versionInfo: {
+    installedVersion: string;
+    newVersion: string;
+    headerMessage: string;
+    fullText: string;
+  };
 }
 
 interface BatchStatus {
@@ -133,6 +149,7 @@ const useApiCall = () => {
 };
 
 const App: React.FC = () => {
+  // State variables
   const [orgs, setOrgs] = useState<Org[]>([]);
   const [selectedOrg, setSelectedOrg] = useState<string>('');
   const [selectedOrgs, setSelectedOrgs] = useState<string[]>([]);
@@ -147,43 +164,23 @@ const App: React.FC = () => {
   const [historyTotal, setHistoryTotal] = useState<number>(0);
   const [historyOffset, setHistoryOffset] = useState<number>(0);
   const [sessionId] = useState<string>(`session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`);
-  const eventSourceRef = useRef<EventSource | null>(null);
-  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const [useSSE, setUseSSE] = useState<boolean>(true);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'error'>('connecting');
-  const { callApi, loading, error: apiError, setLoading, setError: setApiError } = useApiCall();
-
   const [showScreenshot, setShowScreenshot] = useState<string | null>(null);
   const [lastHeartbeat, setLastHeartbeat] = useState<number>(Date.now());
   const [activeBrowserCount, setActiveBrowserCount] = useState<number>(0);
+  const [versionConfirmations, setVersionConfirmations] = useState<Record<string, VersionConfirmationUpdate>>({});
 
-  // Fetch orgs on mount
-  useEffect(() => {
-    fetchOrgs();
-    fetchHistory();
-  }, []);
+  // Refs
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      stopStatusUpdates();
-    };
-  }, []);
+  // Custom hook
+  const { callApi, loading, error: apiError, setLoading, setError: setApiError } = useApiCall();
 
-  // Monitor connection health
-  useEffect(() => {
-    const checkConnection = setInterval(() => {
-      if (isUpgrading && Date.now() - lastHeartbeat > 60000) {
-        setConnectionStatus('error');
-        setConnectionError('Connection lost - no heartbeat received');
-      }
-    }, 30000);
-
-    return () => clearInterval(checkConnection);
-  }, [isUpgrading, lastHeartbeat]);
-
-  const fetchOrgs = async () => {
+  // Fetch functions
+  const fetchOrgs = useCallback(async () => {
     try {
       setLoading(true);
       setConnectionStatus('connecting');
@@ -198,9 +195,9 @@ const App: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [callApi, setLoading]);
 
-  const fetchHistory = async (offset: number = 0, limit: number = 50) => {
+  const fetchHistory = useCallback(async (offset: number = 0, limit: number = 50) => {
     try {
       const data: HistoryResponse = await callApi(`${API_URL}/api/history?offset=${offset}&limit=${limit}`);
       
@@ -239,104 +236,21 @@ const App: React.FC = () => {
       }
       // Don't show error for history, it's not critical
     }
-  };
+  }, [callApi]);
 
-  const loadMoreHistory = () => {
+  const loadMoreHistory = useCallback(() => {
     if (history && history.length < historyTotal && !loading) {
       fetchHistory(historyOffset);
     }
-  };
+  }, [history, historyTotal, loading, fetchHistory, historyOffset]);
 
-  const validatePackageId = (packageId: string): boolean => {
+  // Validation function
+  const validatePackageId = useCallback((packageId: string): boolean => {
     return packageId.length === 15 && /^04t[a-zA-Z0-9]{12}$/.test(packageId);
-  };
+  }, []);
 
-  const startStatusUpdates = () => {
-    setConnectionError(null);
-    setConnectionStatus('connecting');
-    
-    if (useSSE && typeof EventSource !== 'undefined') {
-      try {
-        const url = new URL(`${API_URL}/api/status-stream/${sessionId}`);
-        if (API_KEY) {
-          url.searchParams.append('api_key', API_KEY);
-        }
-        
-        eventSourceRef.current = new EventSource(url.toString());
-        
-        eventSourceRef.current.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            handleStatusUpdate(data);
-          } catch (error) {
-            console.error('Error parsing SSE message:', error);
-          }
-        };
-
-        eventSourceRef.current.onerror = (error) => {
-          console.log('SSE error, falling back to polling');
-          setConnectionStatus('error');
-          eventSourceRef.current?.close();
-          setUseSSE(false);
-          startPolling();
-        };
-
-        eventSourceRef.current.onopen = () => {
-          console.log('SSE connection established');
-          setConnectionError(null);
-          setConnectionStatus('connected');
-        };
-      } catch (error) {
-        console.log('SSE not supported, using polling');
-        setUseSSE(false);
-        startPolling();
-      }
-    } else {
-      startPolling();
-    }
-  };
-
-  const startPolling = () => {
-    let errorCount = 0;
-    setConnectionStatus('connecting');
-    
-    pollingIntervalRef.current = setInterval(async () => {
-      try {
-        const data = await callApi(`${API_URL}/api/status/${sessionId}`);
-        
-        Object.values(data).forEach((update: any) => {
-          handleStatusUpdate(update);
-        });
-        
-        errorCount = 0; // Reset error count on success
-        setConnectionError(null);
-        setConnectionStatus('connected');
-      } catch (error) {
-        errorCount++;
-        console.error('Polling error:', error);
-        
-        if (errorCount > 3) {
-          setConnectionError('Lost connection to server. Please refresh the page.');
-          setConnectionStatus('error');
-          stopStatusUpdates();
-        }
-      }
-    }, 2000); // Slightly slower polling to reduce server load
-  };
-
-  const stopStatusUpdates = () => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
-    }
-    if (pollingIntervalRef.current) {
-      clearInterval(pollingIntervalRef.current);
-      pollingIntervalRef.current = null;
-    }
-    setConnectionStatus('disconnected');
-  };
-
-  const handleStatusUpdate = (data: any) => {
+  // Status update handling
+  const handleStatusUpdate = useCallback((data: any) => {
     try {
       // Update heartbeat timestamp
       if (data.type === 'heartbeat' || data.timestamp) {
@@ -345,6 +259,14 @@ const App: React.FC = () => {
 
       if (data.type === 'connected') {
         setConnectionStatus('connected');
+        return;
+      }
+
+      if (data.type === 'version-confirmation-required') {
+        setVersionConfirmations(prev => ({
+          ...prev,
+          [data.upgradeId]: data
+        }));
         return;
       }
 
@@ -389,9 +311,121 @@ const App: React.FC = () => {
     } catch (error) {
       console.error('Error handling status update:', error);
     }
-  };
+  }, [fetchHistory]);
 
-  const handleSingleUpgrade = async (): Promise<void> => {
+  // Connection management
+  const startPolling = useCallback(() => {
+    let errorCount = 0;
+    setConnectionStatus('connecting');
+    
+    pollingIntervalRef.current = setInterval(async () => {
+      try {
+        const data = await callApi(`${API_URL}/api/status/${sessionId}`);
+        
+        Object.values(data).forEach((update: any) => {
+          handleStatusUpdate(update);
+        });
+        
+        errorCount = 0; // Reset error count on success
+        setConnectionError(null);
+        setConnectionStatus('connected');
+      } catch (error) {
+        errorCount++;
+        console.error('Polling error:', error);
+        
+        if (errorCount > 3) {
+          setConnectionError('Lost connection to server. Please refresh the page.');
+          setConnectionStatus('error');
+          stopStatusUpdates();
+        }
+      }
+    }, 2000); // Slightly slower polling to reduce server load
+  }, [callApi, sessionId, handleStatusUpdate]);
+
+  const startStatusUpdates = useCallback(() => {
+    setConnectionError(null);
+    setConnectionStatus('connecting');
+    
+    if (useSSE && typeof EventSource !== 'undefined') {
+      try {
+        const url = new URL(`${API_URL}/api/status-stream/${sessionId}`);
+        if (API_KEY) {
+          url.searchParams.append('api_key', API_KEY);
+        }
+        
+        eventSourceRef.current = new EventSource(url.toString());
+        
+        eventSourceRef.current.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            handleStatusUpdate(data);
+          } catch (error) {
+            console.error('Error parsing SSE message:', error);
+          }
+        };
+
+        eventSourceRef.current.onerror = (error) => {
+          console.log('SSE error, falling back to polling');
+          setConnectionStatus('error');
+          eventSourceRef.current?.close();
+          setUseSSE(false);
+          startPolling();
+        };
+
+        eventSourceRef.current.onopen = () => {
+          console.log('SSE connection established');
+          setConnectionError(null);
+          setConnectionStatus('connected');
+        };
+      } catch (error) {
+        console.log('SSE not supported, using polling');
+        setUseSSE(false);
+        startPolling();
+      }
+    } else {
+      startPolling();
+    }
+  }, [useSSE, sessionId, handleStatusUpdate, startPolling]);
+
+  const stopStatusUpdates = useCallback(() => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+      pollingIntervalRef.current = null;
+    }
+    setConnectionStatus('disconnected');
+  }, []);
+
+  // Version confirmation handling
+  const handleVersionConfirmation = useCallback(async (upgradeId: string, confirmed: boolean) => {
+    try {
+      await callApi(`${API_URL}/api/confirm-upgrade`, {
+        method: 'POST',
+        body: JSON.stringify({
+          sessionId: sessionId,
+          upgradeId: upgradeId,
+          confirmed: confirmed
+        }),
+      });
+      
+      // Remove from confirmations list
+      setVersionConfirmations(prev => {
+        const updated = { ...prev };
+        delete updated[upgradeId];
+        return updated;
+      });
+      
+    } catch (error) {
+      console.error('Error sending confirmation:', error);
+      alert(`Failed to send confirmation: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }, [callApi, sessionId]);
+
+  // Upgrade handlers
+  const handleSingleUpgrade = useCallback(async (): Promise<void> => {
     // Validation
     if (!selectedOrg) {
       alert('Please select an organization');
@@ -410,6 +444,7 @@ const App: React.FC = () => {
 
     setIsUpgrading(true);
     setStatus({});
+    setVersionConfirmations({});
     setApiError(null);
     startStatusUpdates();
     
@@ -429,9 +464,9 @@ const App: React.FC = () => {
       stopStatusUpdates();
       alert(`Failed to start upgrade: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
-  };
+  }, [selectedOrg, packageUrl, validatePackageId, sessionId, callApi, startStatusUpdates, stopStatusUpdates, setApiError]);
 
-  const handleBatchUpgrade = async (): Promise<void> => {
+  const handleBatchUpgrade = useCallback(async (): Promise<void> => {
     // Validation
     if (selectedOrgs.length === 0) {
       alert('Please select at least one organization');
@@ -460,6 +495,7 @@ const App: React.FC = () => {
 
     setIsUpgrading(true);
     setStatus({});
+    setVersionConfirmations({});
     setBatchStatus(null);
     setBatchProgress(null);
     setApiError(null);
@@ -482,9 +518,10 @@ const App: React.FC = () => {
       stopStatusUpdates();
       alert(`Failed to start batch upgrade: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
-  };
+  }, [selectedOrgs, packageUrl, validatePackageId, maxConcurrent, sessionId, callApi, startStatusUpdates, stopStatusUpdates, setApiError]);
 
-  const toggleOrgSelection = (orgId: string) => {
+  // Organization selection handlers
+  const toggleOrgSelection = useCallback((orgId: string) => {
     setSelectedOrgs(prev => {
       if (prev.includes(orgId)) {
         return prev.filter(id => id !== orgId);
@@ -492,17 +529,18 @@ const App: React.FC = () => {
         return [...prev, orgId];
       }
     });
-  };
+  }, []);
 
-  const selectAllOrgs = () => {
+  const selectAllOrgs = useCallback(() => {
     setSelectedOrgs(orgs.map(org => org.id));
-  };
+  }, [orgs]);
 
-  const deselectAllOrgs = () => {
+  const deselectAllOrgs = useCallback(() => {
     setSelectedOrgs([]);
-  };
+  }, []);
 
-  const getStatusColor = (status: string): string => {
+  // Utility functions
+  const getStatusColor = useCallback((status: string): string => {
     switch (status) {
       case 'completed':
       case 'success': return 'text-green-600';
@@ -511,12 +549,15 @@ const App: React.FC = () => {
       case 'upgrading': return 'text-blue-600';
       case 'timeout': return 'text-orange-600';
       case 'verification-required': return 'text-purple-600';
+      case 'awaiting-confirmation': return 'text-yellow-600';
+      case 'user-confirmed': return 'text-green-600';
+      case 'extracting-version-info': return 'text-blue-600';
       case 'in-progress': return 'text-yellow-600';
       default: return 'text-gray-600';
     }
-  };
+  }, []);
 
-  const getStatusIcon = (status: string): string => {
+  const getStatusIcon = useCallback((status: string): string => {
     switch (status) {
       case 'completed':
       case 'success': return '✅';
@@ -525,27 +566,30 @@ const App: React.FC = () => {
       case 'upgrading': return '🔄';
       case 'timeout': return '⚠️';
       case 'verification-required': return '🔐';
+      case 'awaiting-confirmation': return '❓';
+      case 'user-confirmed': return '👍';
+      case 'extracting-version-info': return '📋';
       case 'in-progress': return '⏳';
       default: return '⏳';
     }
-  };
+  }, []);
 
-  const formatDuration = (seconds: number | null): string => {
+  const formatDuration = useCallback((seconds: number | null): string => {
     if (!seconds) return '-';
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins}m ${secs}s`;
-  };
+  }, []);
 
-  const formatDate = (dateString: string): string => {
+  const formatDate = useCallback((dateString: string): string => {
     try {
       return new Date(dateString).toLocaleString();
     } catch {
       return dateString;
     }
-  };
+  }, []);
 
-  const getConnectionStatusColor = (): string => {
+  const getConnectionStatusColor = useCallback((): string => {
     switch (connectionStatus) {
       case 'connected': return 'text-green-600';
       case 'connecting': return 'text-yellow-600';
@@ -553,9 +597,9 @@ const App: React.FC = () => {
       case 'error': return 'text-red-600';
       default: return 'text-gray-600';
     }
-  };
+  }, [connectionStatus]);
 
-  const getConnectionStatusIcon = (): string => {
+  const getConnectionStatusIcon = useCallback((): string => {
     switch (connectionStatus) {
       case 'connected': return '🟢';
       case 'connecting': return '🟡';
@@ -563,9 +607,32 @@ const App: React.FC = () => {
       case 'error': return '🔴';
       default: return '⚪';
     }
-  };
+  }, [connectionStatus]);
 
-  // Error display component
+  // Effects
+  useEffect(() => {
+    fetchOrgs();
+    fetchHistory();
+  }, [fetchOrgs, fetchHistory]);
+
+  useEffect(() => {
+    return () => {
+      stopStatusUpdates();
+    };
+  }, [stopStatusUpdates]);
+
+  useEffect(() => {
+    const checkConnection = setInterval(() => {
+      if (isUpgrading && Date.now() - lastHeartbeat > 60000) {
+        setConnectionStatus('error');
+        setConnectionError('Connection lost - no heartbeat received');
+      }
+    }, 30000);
+
+    return () => clearInterval(checkConnection);
+  }, [isUpgrading, lastHeartbeat]);
+
+  // Component definitions
   const ErrorAlert = ({ message }: { message: string }) => (
     <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded relative mb-4">
       <strong className="font-bold">Error: </strong>
@@ -573,7 +640,6 @@ const App: React.FC = () => {
     </div>
   );
 
-  // Connection status component
   const ConnectionStatus = () => {
     if (connectionError) {
       return <ErrorAlert message={connectionError} />;
@@ -590,7 +656,78 @@ const App: React.FC = () => {
     return null;
   };
 
-  // Screenshot Modal Component
+  const VersionConfirmationModal = ({ confirmation }: { confirmation: VersionConfirmationUpdate }) => {
+    const org = orgs.find(o => o.id === confirmation.orgId);
+    
+    return (
+      <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4">
+        <div className="bg-white rounded-lg max-w-2xl w-full overflow-hidden" onClick={(e) => e.stopPropagation()}>
+          <div className="flex justify-between items-center p-6 border-b bg-blue-50">
+            <h3 className="text-xl font-semibold text-blue-900">Package Version Confirmation</h3>
+            <span className="text-sm text-blue-600">
+              {org?.name || confirmation.orgId}
+            </span>
+          </div>
+          
+          <div className="p-6">
+            <div className="mb-4">
+              <p className="text-gray-700 mb-4">{confirmation.versionInfo.headerMessage}</p>
+            </div>
+            
+            <div className="bg-gray-50 rounded-lg p-4 mb-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="bg-orange-50 border border-orange-200 rounded-lg p-3">
+                  <h4 className="font-semibold text-orange-900 mb-2">Currently Installed</h4>
+                  <p className="text-lg font-mono text-orange-800">
+                    {confirmation.versionInfo.installedVersion}
+                  </p>
+                </div>
+                
+                <div className="bg-green-50 border border-green-200 rounded-lg p-3">
+                  <h4 className="font-semibold text-green-900 mb-2">New Version</h4>
+                  <p className="text-lg font-mono text-green-800">
+                    {confirmation.versionInfo.newVersion}
+                  </p>
+                </div>
+              </div>
+            </div>
+            
+            <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-6">
+              <h4 className="font-semibold text-yellow-900 mb-2">⚠️ Important</h4>
+              <ul className="list-disc list-inside text-sm text-yellow-800 space-y-1">
+                <li>Please verify this is the correct package version you want to install</li>
+                <li>The upgrade process will preserve existing data</li>
+                <li>This action cannot be easily undone</li>
+                <li>Make sure you have tested this version in a sandbox environment</li>
+              </ul>
+            </div>
+            
+            <div className="text-xs text-gray-500 mb-6 p-3 bg-gray-50 rounded">
+              <strong>Full upgrade message:</strong><br />
+              {confirmation.versionInfo.fullText}
+            </div>
+          </div>
+          
+          <div className="flex justify-between items-center p-6 border-t bg-gray-50">
+            <button
+              onClick={() => handleVersionConfirmation(confirmation.upgradeId, false)}
+              className="px-6 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 font-medium"
+            >
+              ❌ Cancel Upgrade
+            </button>
+            
+            <button
+              onClick={() => handleVersionConfirmation(confirmation.upgradeId, true)}
+              className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 font-medium"
+            >
+              ✅ Confirm & Proceed
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const ScreenshotModal = ({ screenshot, onClose }: { screenshot: string; onClose: () => void }) => (
     <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4" onClick={onClose}>
       <div className="bg-white rounded-lg max-w-6xl max-h-[90vh] overflow-hidden" onClick={(e) => e.stopPropagation()}>
@@ -749,6 +886,7 @@ const App: React.FC = () => {
                   <li>Each upgrade typically takes 2-5 minutes to complete</li>
                   <li>Cloud Run has a 5-minute timeout limit per request</li>
                   <li>Screenshots are captured automatically on errors for debugging</li>
+                  <li>You'll be asked to confirm package versions before proceeding</li>
                 </ul>
               </div>
             </div>
@@ -880,6 +1018,7 @@ const App: React.FC = () => {
                     <li>Check the history tab for detailed results</li>
                     <li>Screenshots are captured for failed upgrades</li>
                     <li>Maximum 50 organizations per batch for resource management</li>
+                    <li>Version confirmation will be required for each org</li>
                   </ul>
                 </div>
               </div>
@@ -1104,6 +1243,11 @@ const App: React.FC = () => {
                       </span>
                     </div>
                     <p className="text-sm text-gray-600">{orgStatus.message}</p>
+                    {orgStatus.status === 'awaiting-confirmation' && (
+                      <p className="text-xs text-yellow-600 mt-2">
+                        ❓ Please review and confirm the package version information in the popup
+                      </p>
+                    )}
                     {orgStatus.status === 'verification-required' && (
                       <p className="text-xs text-purple-600 mt-2">
                         ⚠️ Manual action required: Please complete verification in the browser window
@@ -1143,6 +1287,14 @@ const App: React.FC = () => {
             </div>
           </div>
         </div>
+
+        {/* Version Confirmation Modals */}
+        {Object.values(versionConfirmations).map((confirmation) => (
+          <VersionConfirmationModal 
+            key={confirmation.upgradeId} 
+            confirmation={confirmation} 
+          />
+        ))}
 
         {/* Screenshot Modal */}
         {showScreenshot && (

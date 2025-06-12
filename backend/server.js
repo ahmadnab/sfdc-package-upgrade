@@ -417,6 +417,42 @@ app.get('/api/status/:sessionId', authenticate, asyncHandler(async (req, res) =>
   res.json(statuses);
 }));
 
+// User confirmation endpoint for version verification
+app.post('/api/confirm-upgrade', authenticate, asyncHandler(async (req, res) => {
+  const { sessionId, upgradeId, confirmed } = req.body;
+  
+  if (!sessionId || !upgradeId || typeof confirmed !== 'boolean') {
+    return res.status(400).json({ 
+      error: 'Validation error',
+      message: 'Missing required fields: sessionId, upgradeId, confirmed (boolean)'
+    });
+  }
+  
+  try {
+    // Store the confirmation
+    const confirmationKey = `${sessionId}-${upgradeId}-confirmation`;
+    statusStore.set(confirmationKey, { 
+      confirmed,
+      timestamp: Date.now()
+    });
+    
+    console.log(`User confirmation received for ${upgradeId}: ${confirmed ? 'approved' : 'cancelled'}`);
+    
+    res.json({ 
+      message: `Upgrade ${confirmed ? 'confirmed' : 'cancelled'}`,
+      upgradeId,
+      confirmed
+    });
+    
+  } catch (error) {
+    console.error('Error handling confirmation:', error);
+    res.status(500).json({ 
+      error: 'Server error',
+      message: error.message
+    });
+  }
+}));
+
 // Get organizations
 app.get('/api/orgs', authenticate, asyncHandler(async (req, res) => {
   try {
@@ -844,7 +880,110 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
         throw new Error(`Failed to load package page: ${error.message}`);
       }
       
-      // Step 6: Find and click upgrade button with enhanced strategies
+      // Step 6: Extract version information and request confirmation
+      broadcastStatus(sessionId, { 
+        type: 'status',
+        orgId: org.id,
+        upgradeId,
+        batchId,
+        status: 'extracting-version-info', 
+        message: 'Extracting package version information...' 
+      });
+      
+      let versionInfo = null;
+      try {
+        // Wait for the upgrade text element to be present
+        await page.waitForSelector('#upgradeText', { timeout: 10000 });
+        
+        // Extract version information
+        const upgradeTextElement = await page.$('#upgradeText');
+        if (upgradeTextElement) {
+          const upgradeText = await upgradeTextElement.textContent();
+          
+          // Extract installed version
+          const installedMatch = upgradeText.match(/Installed:\s*([^\s(]+)/);
+          const installedVersion = installedMatch ? installedMatch[1] : null;
+          
+          // Extract new version
+          const newVersionMatch = upgradeText.match(/New Version:\s*([^\s(]+)/);
+          const newVersion = newVersionMatch ? newVersionMatch[1] : null;
+          
+          // Extract header message
+          const headerMatch = upgradeText.match(/^([^\.]+\.)/);
+          const headerMessage = headerMatch ? headerMatch[1] : 'Package upgrade available';
+          
+          versionInfo = {
+            installedVersion,
+            newVersion,
+            headerMessage: headerMessage.trim(),
+            fullText: upgradeText.trim()
+          };
+          
+          console.log('Extracted version info:', versionInfo);
+        }
+      } catch (error) {
+        console.log('Could not extract version info:', error.message);
+        // Continue without version info if extraction fails
+      }
+      
+      // Send version info for user confirmation
+      if (versionInfo && versionInfo.installedVersion && versionInfo.newVersion) {
+        broadcastStatus(sessionId, { 
+          type: 'version-confirmation-required',
+          orgId: org.id,
+          upgradeId,
+          batchId,
+          status: 'awaiting-confirmation', 
+          message: 'Please confirm the package versions before proceeding',
+          versionInfo
+        });
+        
+        // Wait for user confirmation (up to 2 minutes)
+        let confirmationReceived = false;
+        let userConfirmed = false;
+        
+        const confirmationTimeout = setTimeout(() => {
+          if (!confirmationReceived) {
+            console.log('Version confirmation timeout for', org.name);
+          }
+        }, VERIFICATION_TIMEOUT);
+        
+        // Check for confirmation in a loop
+        for (let i = 0; i < 120; i++) { // 2 minutes max wait
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          
+          // Check if confirmation was received (this would be set via another API endpoint)
+          const confirmationKey = `${sessionId}-${upgradeId}-confirmation`;
+          const confirmation = statusStore.get(confirmationKey);
+          
+          if (confirmation) {
+            confirmationReceived = true;
+            userConfirmed = confirmation.confirmed;
+            statusStore.delete(confirmationKey); // Clean up
+            clearTimeout(confirmationTimeout);
+            break;
+          }
+        }
+        
+        if (!confirmationReceived) {
+          throw new Error('User confirmation timeout - no response received within 2 minutes');
+        }
+        
+        if (!userConfirmed) {
+          throw new Error('User cancelled the upgrade after reviewing version information');
+        }
+        
+        broadcastStatus(sessionId, { 
+          type: 'status',
+          orgId: org.id,
+          upgradeId,
+          batchId,
+          status: 'user-confirmed', 
+          message: 'User confirmed version upgrade. Proceeding...' 
+        });
+      }
+      
+      // Step 7: Find and click upgrade button with enhanced strategies
       broadcastStatus(sessionId, { 
         type: 'status',
         orgId: org.id,
@@ -916,7 +1055,7 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
         message: 'Upgrade initiated! Waiting for completion...' 
       });
       
-      // Step 7: Wait for completion with multiple success indicators
+      // Step 8: Wait for completion with multiple success indicators
       let upgradeCompleted = false;
       const successPatterns = [
         'successfully',
