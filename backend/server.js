@@ -438,21 +438,28 @@ app.get('/api/history', authenticate, asyncHandler(async (req, res) => {
     const { limit = 50, offset = 0 } = req.query;
     const history = await loadHistory();
     
-    const startIndex = parseInt(offset);
-    const endIndex = startIndex + parseInt(limit);
-    const paginatedHistory = history.upgrades.slice(startIndex, endIndex);
+    // Ensure upgrades array exists
+    const upgrades = history.upgrades || [];
+    
+    const startIndex = parseInt(offset.toString());
+    const endIndex = startIndex + parseInt(limit.toString());
+    const paginatedHistory = upgrades.slice(startIndex, endIndex);
     
     res.json({
       upgrades: paginatedHistory,
-      total: history.upgrades.length,
-      limit: parseInt(limit),
-      offset: parseInt(offset)
+      total: upgrades.length,
+      limit: parseInt(limit.toString()),
+      offset: parseInt(offset.toString())
     });
   } catch (error) {
     console.error('Error fetching history:', error);
     res.status(500).json({ 
       error: 'Server error',
-      message: 'Failed to fetch history'
+      message: 'Failed to fetch history',
+      upgrades: [],
+      total: 0,
+      limit: 50,
+      offset: 0
     });
   }
 }));

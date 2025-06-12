@@ -203,21 +203,46 @@ const App: React.FC = () => {
   const fetchHistory = async (offset: number = 0, limit: number = 50) => {
     try {
       const data: HistoryResponse = await callApi(`${API_URL}/api/history?offset=${offset}&limit=${limit}`);
-      if (offset === 0) {
-        setHistory(data.upgrades);
+      
+      // Handle both paginated response and direct array response for backward compatibility
+      let upgrades: HistoryEntry[] = [];
+      let total: number = 0;
+      
+      if (Array.isArray(data)) {
+        // Direct array response (old format)
+        upgrades = data;
+        total = data.length;
+      } else if (data && Array.isArray(data.upgrades)) {
+        // Paginated response (new format)
+        upgrades = data.upgrades;
+        total = data.total || upgrades.length;
       } else {
-        setHistory(prev => [...prev, ...data.upgrades]);
+        // Fallback
+        upgrades = [];
+        total = 0;
       }
-      setHistoryTotal(data.total);
-      setHistoryOffset(offset + data.upgrades.length);
+      
+      if (offset === 0) {
+        setHistory(upgrades);
+      } else {
+        setHistory(prev => [...prev, ...upgrades]);
+      }
+      setHistoryTotal(total);
+      setHistoryOffset(offset + upgrades.length);
     } catch (error) {
       console.error('Error fetching history:', error);
+      // Set empty state on error
+      if (offset === 0) {
+        setHistory([]);
+        setHistoryTotal(0);
+        setHistoryOffset(0);
+      }
       // Don't show error for history, it's not critical
     }
   };
 
   const loadMoreHistory = () => {
-    if (history.length < historyTotal) {
+    if (history && history.length < historyTotal && !loading) {
       fetchHistory(historyOffset);
     }
   };
@@ -958,8 +983,11 @@ const App: React.FC = () => {
               </button>
             </div>
             
-            {history.length === 0 ? (
-              <p className="text-gray-500">No upgrade history available</p>
+            {!history || history.length === 0 ? (
+              <div className="text-center py-8">
+                <p className="text-gray-500">No upgrade history available</p>
+                {loading && <p className="text-blue-500 mt-2">Loading...</p>}
+              </div>
             ) : (
               <>
                 <div className="overflow-x-auto">
@@ -987,7 +1015,7 @@ const App: React.FC = () => {
                       </tr>
                     </thead>
                     <tbody className="bg-white divide-y divide-gray-200">
-                      {history.map((entry) => (
+                      {history && history.map((entry) => (
                         <tr key={entry.id} className="hover:bg-gray-50">
                           <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">
                             {formatDate(entry.startTime)}
@@ -1043,14 +1071,14 @@ const App: React.FC = () => {
                 </div>
                 
                 {/* Load More Button */}
-                {history.length < historyTotal && (
+                {history && history.length > 0 && history.length < historyTotal && (
                   <div className="mt-4 text-center">
                     <button
                       onClick={loadMoreHistory}
                       className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-gray-300"
                       disabled={loading}
                     >
-                      {loading ? 'Loading...' : `Load More (${historyTotal - history.length} remaining)`}
+                      {loading ? 'Loading...' : `Load More (${Math.max(0, historyTotal - history.length)} remaining)`}
                     </button>
                   </div>
                 )}
