@@ -136,7 +136,6 @@ const useApiCall = () => {
       
       // Retry logic for network errors
       if (retries > 0 && (error.message.includes('Failed to fetch') || error.message.includes('NetworkError'))) {
-        console.log(`Retrying API call... (${retries} retries left)`);
         await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
         return callApi(url, options, retries - 1);
       }
@@ -315,18 +314,6 @@ const App: React.FC = () => {
   // Status update handling
   const handleStatusUpdate = useCallback((data: any) => {
     try {
-      // Enhanced debug log for all event types
-      console.log('[DEBUG][handleStatusUpdate] EVENT:', {
-        type: data.type,
-        orgId: data.orgId,
-        upgradeId: data.upgradeId,
-        status: data.status,
-        message: data.message,
-        keys: Object.keys(data),
-        screenshot: data.screenshot ? `present (${data.screenshot.length} chars)` : 'absent',
-        preview: data.screenshot ? data.screenshot.substring(0, 40) + '...' : undefined
-      });
-
       // Update heartbeat timestamp
       if (data.type === 'heartbeat' || data.timestamp) {
         setLastHeartbeat(Date.now());
@@ -351,12 +338,7 @@ const App: React.FC = () => {
         if (data.screenshot) {
           cleanedScreenshot = cleanScreenshot(data.screenshot);
           const validation = validateScreenshot(cleanedScreenshot);
-          if (validation.isValid) {
-            console.log(`✅ Valid screenshot received for ${data.orgId}, size: ${cleanedScreenshot.length}`);
-          } else {
-            console.warn(`⚠️ Invalid screenshot for ${data.orgId}: ${validation.error}`);
-            console.warn('Original data:', data.screenshot.substring(0, 100));
-            console.warn('Cleaned data:', cleanedScreenshot.substring(0, 100));
+          if (!validation.isValid) {
             // Don't use invalid screenshot
             cleanedScreenshot = undefined;
           }
@@ -367,12 +349,6 @@ const App: React.FC = () => {
             ...data,
             screenshot: data.screenshot !== undefined ? cleanedScreenshot : prevStatus.screenshot
           };
-          console.log('[DEBUG] setStatus (status event):', {
-            orgId: data.orgId,
-            prevStatus,
-            cleanedScreenshotLength: cleanedScreenshot ? cleanedScreenshot.length : 0,
-            mergedStatus,
-          });
           return {
             ...prev,
             [data.orgId]: mergedStatus
@@ -403,37 +379,26 @@ const App: React.FC = () => {
         setBatchProgress(data);
       } else if (data.type === 'screenshot') {
         // Handle separate screenshot data with validation
-        console.log(`Received separate screenshot for ${data.orgId}, size: ${data.screenshot?.length || 0}`);
         let cleanedScreenshot: string | undefined = undefined;
         if (data.screenshot) {
           cleanedScreenshot = cleanScreenshot(data.screenshot);
           const validation = validateScreenshot(cleanedScreenshot);
-          if (validation.isValid) {
-            console.log(`✅ Valid separate screenshot for ${data.orgId}`);
-          } else {
-            console.error(`❌ Invalid separate screenshot for ${data.orgId}: ${validation.error}`);
+          if (!validation.isValid) {
             cleanedScreenshot = undefined;
           }
         }
-        if (cleanedScreenshot) {
+        if (cleanedScreenshot && data.orgId) {
           setStatus(prev => {
             const prevStatus = prev[data.orgId] || {};
-            const newStatus = {
-              ...prevStatus,
-              screenshot: cleanedScreenshot,
-              // Fallbacks for required fields if missing
-              status: prevStatus.status ?? 'error',
-              message: prevStatus.message ?? 'Screenshot received',
-              // Also propagate upgradeId and batchId if present in the event
-              upgradeId: prevStatus.upgradeId ?? data.upgradeId,
-              batchId: prevStatus.batchId ?? data.batchId
-            };
-            console.log('[DEBUG] setStatus (screenshot event):', {
+            const newStatus: StatusUpdate = {
+              type: 'status',
               orgId: data.orgId,
-              prevStatus,
-              cleanedScreenshotLength: cleanedScreenshot ? cleanedScreenshot.length : 0,
-              newStatus,
-            });
+              screenshot: cleanedScreenshot,
+              status: prevStatus.status || data.status || 'error',
+              message: prevStatus.message || data.message || 'Screenshot received',
+              upgradeId: prevStatus.upgradeId || data.upgradeId,
+              batchId: prevStatus.batchId || data.batchId
+            };
             return {
               ...prev,
               [data.orgId]: newStatus
@@ -489,9 +454,6 @@ const App: React.FC = () => {
         eventSourceRef.current = new EventSource(url.toString());
         
         eventSourceRef.current.onmessage = (event) => {
-          // Raw event debug log
-          console.log('[SSE RAW]', event.data);
-
           try {
             const data = JSON.parse(event.data);
             handleStatusUpdate(data);
@@ -501,7 +463,6 @@ const App: React.FC = () => {
         };
 
         eventSourceRef.current.onerror = (error) => {
-          console.log('SSE error, falling back to polling');
           setConnectionStatus('error');
           eventSourceRef.current?.close();
           setUseSSE(false);
@@ -509,12 +470,10 @@ const App: React.FC = () => {
         };
 
         eventSourceRef.current.onopen = () => {
-          console.log('SSE connection established');
           setConnectionError(null);
           setConnectionStatus('connected');
         };
       } catch (error) {
-        console.log('SSE not supported, using polling');
         setUseSSE(false);
         startPolling();
       }
@@ -548,76 +507,6 @@ const App: React.FC = () => {
     }
   }, [callApi, sessionId]);
 
-  // Test screenshot function (alternative approach)
-  const testScreenshot = useCallback(async () => {
-    if (!selectedOrg) {
-      alert('Please select an organization first');
-      return;
-    }
-    
-    // Create a fake screenshot for testing
-    const testScreenshotData = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
-    
-    // Simulate receiving a status update with screenshot
-    const testStatusUpdate = {
-      type: 'status',
-      orgId: selectedOrg,
-      upgradeId: 'test-' + Date.now(),
-      status: 'error',
-      message: 'Test screenshot - this is a simulated error with screenshot',
-      screenshot: testScreenshotData,
-      timestamp: Date.now()
-    };
-    
-    console.log('Simulating screenshot status update:', testStatusUpdate);
-    handleStatusUpdate(testStatusUpdate);
-    
-    alert('Test screenshot added to status panel');
-  }, [selectedOrg, handleStatusUpdate]);
-
-  const testValidScreenshot = useCallback(async () => {
-    // Create a small valid PNG image (red square)
-    const validBase64 = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==';
-    
-    const testStatusUpdate = {
-      type: 'status',
-      orgId: selectedOrg || 'test-org',
-      upgradeId: 'valid-test-' + Date.now(),
-      status: 'error',
-      message: 'Testing with valid base64 image data',
-      screenshot: validBase64,
-      timestamp: Date.now()
-    };
-    
-    console.log('Testing with valid base64 image:', validBase64.length, 'chars');
-    handleStatusUpdate(testStatusUpdate);
-    
-    alert('Valid base64 test screenshot added');
-  }, [selectedOrg, handleStatusUpdate]);
-
-  // Force error with screenshot for testing (using existing endpoint)
-  const forceErrorScreenshot = useCallback(async () => {
-    if (!selectedOrg) {
-      alert('Please select an organization first');
-      return;
-    }
-    
-    try {
-      startStatusUpdates();
-      await callApi(`${API_URL}/api/test-screenshot`, {
-        method: 'POST',
-        body: JSON.stringify({
-          sessionId: sessionId,
-          orgId: selectedOrg
-        }),
-      });
-      alert('Server screenshot test initiated! Check the status panel for results.');
-    } catch (error) {
-      console.error('Error testing server screenshot:', error);
-      alert(`Failed to test server screenshot: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  }, [selectedOrg, sessionId, callApi, startStatusUpdates]);
-
   const handleSingleUpgrade = useCallback(async (): Promise<void> => {
     // Validation
     if (!selectedOrg) {
@@ -642,7 +531,7 @@ const App: React.FC = () => {
     startStatusUpdates();
     
     try {
-      const response = await callApi(`${API_URL}/api/upgrade`, {
+      await callApi(`${API_URL}/api/upgrade`, {
         method: 'POST',
         body: JSON.stringify({
           orgId: selectedOrg,
@@ -650,7 +539,6 @@ const App: React.FC = () => {
           sessionId: sessionId
         }),
       });
-      console.log('Upgrade started:', response);
     } catch (error) {
       console.error('Error starting upgrade:', error);
       setIsUpgrading(false);
@@ -695,7 +583,7 @@ const App: React.FC = () => {
     startStatusUpdates();
     
     try {
-      const response = await callApi(`${API_URL}/api/upgrade-batch`, {
+      await callApi(`${API_URL}/api/upgrade-batch`, {
         method: 'POST',
         body: JSON.stringify({
           orgIds: selectedOrgs,
@@ -704,7 +592,6 @@ const App: React.FC = () => {
           sessionId: sessionId
         }),
       });
-      console.log('Batch upgrade started:', response);
     } catch (error) {
       console.error('Error starting batch upgrade:', error);
       setIsUpgrading(false);
@@ -922,7 +809,6 @@ const App: React.FC = () => {
   };
 
   const ScreenshotModal = ({ screenshot, onClose }: { screenshot: string; onClose: () => void }) => {
-    const isTestScreenshot = screenshot.includes('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR42mP8/5+BgYGBgYkDABYgAQdcaYZjAAAAAElFTkSuQmCC');
     const validation = validateScreenshot(screenshot);
     
     return (
@@ -933,9 +819,7 @@ const App: React.FC = () => {
           onClick={(e) => e.stopPropagation()}
         >
           <div className="flex justify-between items-center p-4 border-b">
-            <h3 className="text-lg font-semibold">
-              {isTestScreenshot ? 'Test Screenshot' : 'Error Screenshot'}
-            </h3>
+            <h3 className="text-lg font-semibold">Error Screenshot</h3>
             <button
               onClick={onClose}
               className="text-gray-500 hover:text-gray-700 text-2xl leading-none"
@@ -950,38 +834,11 @@ const App: React.FC = () => {
                   ❌ Invalid Screenshot Data
                 </div>
                 <p className="text-gray-600 mb-4">
-                  The screenshot data received is not in a valid format: {validation.error}
+                  The screenshot data received is not in a valid format.
                 </p>
-                <div className="text-xs bg-gray-100 p-4 rounded text-left">
-                  <strong>Debug Info:</strong><br/>
-                  Length: {screenshot.length} chars<br/>
-                  Error: {validation.error}<br/>
-                  Preview: {screenshot.substring(0, 100)}...
-                </div>
-              </div>
-            ) : isTestScreenshot ? (
-              <div className="text-center py-8">
-                <div className="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded mb-4">
-                  ✅ Screenshot validation passed!
-                </div>
-                <p className="text-gray-600">
-                  This is a test screenshot (2x2 red square). The screenshot capture and display system is working correctly.
-                </p>
-                <div className="mt-4 p-4 bg-gray-100 rounded overflow-auto" style={{ maxWidth: '100%', maxHeight: '50vh' }}>
-                  <img 
-                    src={screenshot} 
-                    alt="Test screenshot" 
-                    className="mx-auto border border-gray-300 block"
-                    style={{ imageRendering: 'pixelated', width: '100px', height: '100px', maxWidth: '100%', maxHeight: '40vh', objectFit: 'contain' }}
-                  />
-                  <p className="text-xs text-gray-500 mt-2">2x2 pixel test image (scaled up)</p>
-                </div>
               </div>
             ) : (
               <div>
-                <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded">
-                  <p className="text-green-700 text-sm">✅ Screenshot validation passed</p>
-                </div>
                 <div className="overflow-auto" style={{ maxWidth: '100%', maxHeight: '50vh' }}>
                   <img 
                     src={screenshot} 
@@ -994,10 +851,10 @@ const App: React.FC = () => {
                       const errorDiv = document.createElement('div');
                       errorDiv.className = 'text-center py-8';
                       errorDiv.innerHTML = `
-                        <div class=\"bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4\">
+                        <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
                           ❌ Failed to display screenshot
                         </div>
-                        <p class=\"text-gray-600\">Screenshot data validation passed but image failed to load.</p>
+                        <p class="text-gray-600">Screenshot data validation passed but image failed to load.</p>
                       `;
                       (e.target as HTMLImageElement).parentNode?.appendChild(errorDiv);
                     }}
@@ -1127,45 +984,6 @@ const App: React.FC = () => {
                   >
                     {isUpgrading ? 'Upgrading...' : 'Start Upgrade'}
                   </button>
-                  
-                  {/* Test Screenshot Button */}
-                  <button
-                    onClick={testScreenshot}
-                    disabled={isUpgrading || !selectedOrg || loading}
-                    className={`w-full py-1 px-4 rounded-md text-sm font-medium transition-colors mt-2 ${
-                      isUpgrading || !selectedOrg || loading
-                        ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
-                        : 'bg-gray-600 text-white hover:bg-gray-700'
-                    }`}
-                  >
-                    🧪 Test Screenshot (Local)
-                  </button>
-                  
-                  {/* Force Error Screenshot Button */}
-                  <button
-                    onClick={forceErrorScreenshot}
-                    disabled={isUpgrading || !selectedOrg || loading}
-                    className={`w-full py-1 px-4 rounded-md text-sm font-medium transition-colors mt-1 ${
-                      isUpgrading || !selectedOrg || loading
-                        ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
-                        : 'bg-blue-100 text-blue-900 hover:bg-blue-200'
-                    }`}
-                  >
-                    📸 Test Server Screenshot
-                  </button>
-                  
-                  {/* Test Valid Base64 Button */}
-                  <button
-                    onClick={testValidScreenshot}
-                    disabled={isUpgrading || loading}
-                    className={`w-full py-1 px-4 rounded-md text-sm font-medium transition-colors mt-1 ${
-                      isUpgrading || loading
-                        ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
-                        : 'bg-green-600 text-white hover:bg-green-700'
-                    }`}
-                  >
-                    ✅ Test Valid Base64
-                  </button>
                 </div>
               </div>
             </div>
@@ -1271,11 +1089,13 @@ const App: React.FC = () => {
                         className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                         disabled={isUpgrading}
                       >
-                        <option value={1}>Sequential (Recommended for Cloud Run)</option>
-                        <option value={2}>2 Concurrent (Higher resource usage)</option>
+                        <option value={1}>Sequential (Recommended for stability)</option>
+                        <option value={2}>2 Concurrent</option>
+                        <option value={3}>3 Concurrent</option>
+                        <option value={4}>4 Concurrent (Maximum)</option>
                       </select>
                       <p className="text-xs text-gray-500 mt-1">
-                        Sequential processing is more reliable with limited resources
+                        Higher concurrency speeds up processing but uses more resources
                       </p>
                     </div>
 
@@ -1305,7 +1125,7 @@ const App: React.FC = () => {
                 <div className="bg-gray-50 rounded-lg shadow-md p-6">
                   <h3 className="font-semibold text-gray-800 mb-3">Batch Upgrade Notes</h3>
                   <ul className="list-disc list-inside space-y-1 text-sm text-gray-600">
-                    <li>Batch upgrades process orgs sequentially by default</li>
+                    <li>Batch upgrades can process up to 4 orgs concurrently</li>
                     <li>Higher concurrency speeds up processing but uses more resources</li>
                     <li>Each org will take 2-5 minutes to process</li>
                     <li>You cannot stop a batch once started</li>
@@ -1530,29 +1350,6 @@ const App: React.FC = () => {
           <div className="bg-white rounded-lg shadow-md p-6 mt-6">
             <h2 className="text-xl font-semibold mb-4">Automation Status</h2>
             
-            {/* Debug Info */}
-            {process.env.NODE_ENV === 'development' && (
-              <div className="mb-4 p-3 bg-gray-100 rounded text-xs">
-                <strong>Debug Info:</strong>
-                <pre>{JSON.stringify(Object.keys(status).reduce((acc, key) => ({
-                  ...acc,
-                  [key]: {
-                    status: status[key].status,
-                    hasScreenshot: !!status[key].screenshot,
-                    screenshotSize: status[key].screenshot?.length || 0,
-                    screenshotFormat: (() => {
-                      const screenshot = status[key].screenshot;
-                      if (!screenshot) return 'None';
-                      const validation = validateScreenshot(screenshot);
-                      return validation.isValid ? 'Valid' : `Invalid: ${validation.error}`;
-                    })(),
-                    screenshotPreview: status[key].screenshot?.substring(0, 50) + '...',
-                    message: status[key].message
-                  }
-                }), {}), null, 2)}</pre>
-              </div>
-            )}
-            
             <div className="space-y-3">
               {Object.entries(status).map(([orgId, orgStatus]) => {
                 const org = orgs.find(o => o.id === orgId);
@@ -1582,7 +1379,7 @@ const App: React.FC = () => {
                             onClick={() => setShowScreenshot(orgStatus.screenshot || '')}
                             className="text-xs text-blue-600 hover:text-blue-800 underline"
                           >
-                            📷 View Error Screenshot ({orgStatus.screenshot.length} bytes)
+                            📷 View Error Screenshot
                           </button>
                         ) : (
                           <p className="text-xs text-gray-500">

@@ -8,7 +8,7 @@ const app = express();
 
 // Constants
 const MAX_UPGRADE_DURATION = 240000; // 4 minutes (Cloud Run limit is 5 min)
-const MAX_CONCURRENT_BROWSERS = 2; // Limit for memory management
+const MAX_CONCURRENT_BROWSERS = 4; // Allow up to 4 concurrent runs
 const BROWSER_LAUNCH_TIMEOUT = 60000; // 1 minute for cold starts
 const PAGE_LOAD_TIMEOUT = 30000; // 30 seconds
 const VERIFICATION_TIMEOUT = 120000; // 2 minutes for manual verification
@@ -62,17 +62,15 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json({ limit: MAX_REQUEST_SIZE }));
 
-// Request logging middleware
+// Request logging middleware (minimal)
 app.use((req, res, next) => {
   const start = Date.now();
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] ${req.method} ${req.path} - IP: ${req.ip || 'unknown'}`);
-  
   res.on('finish', () => {
     const duration = Date.now() - start;
-    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} - ${res.statusCode} (${duration}ms)`);
+    if (config.node_env === 'development' || res.statusCode >= 400) {
+      console.log(`${req.method} ${req.path} - ${res.statusCode} (${duration}ms)`);
+    }
   });
-  
   next();
 });
 
@@ -214,47 +212,101 @@ async function addToHistory(entry) {
   }
 }
 
+// Fixed screenshot capture function
+async function captureScreenshot(page, format = 'png', quality = 90) {
+  try {
+    // Capture screenshot as buffer first
+    const screenshotBuffer = await page.screenshot({ 
+      type: format,
+      quality: format === 'jpeg' ? quality : undefined,
+      fullPage: false, // Use viewport for better performance
+      timeout: 10000
+    });
+    
+    // Convert buffer to base64 string
+    const base64String = screenshotBuffer.toString('base64');
+    
+    // Return proper data URL
+    const mimeType = format === 'png' ? 'image/png' : 'image/jpeg';
+    return `data:${mimeType};base64,${base64String}`;
+    
+  } catch (error) {
+    console.error('Screenshot capture failed:', error.message);
+    return null;
+  }
+}
+
+// Screenshot validation function
+function validateScreenshotData(screenshot) {
+  if (!screenshot || typeof screenshot !== 'string') {
+    return false;
+  }
+  
+  // Check if it starts with data URL format
+  if (!screenshot.startsWith('data:image/')) {
+    return false;
+  }
+  
+  // Check if it contains base64 marker
+  if (!screenshot.includes('base64,')) {
+    return false;
+  }
+  
+  // Extract the base64 part
+  const base64Part = screenshot.split('base64,')[1];
+  if (!base64Part) {
+    return false;
+  }
+  
+  // Check for valid base64 characters only
+  const base64Regex = /^[A-Za-z0-9+/]*={0,2}$/;
+  if (!base64Regex.test(base64Part)) {
+    return false;
+  }
+  
+  // Check length is multiple of 4
+  if (base64Part.length % 4 !== 0) {
+    return false;
+  }
+  
+  return true;
+}
+
 // Status management with memory limits
 function broadcastStatus(sessionId, data) {
   try {
     // Add timestamp
     data.timestamp = Date.now();
-    // Debug log for screenshot emission
-    if (data.screenshot) {
-      console.log(`[BROADCAST] Emitting event for sessionId=${sessionId}, orgId=${data.orgId}, type=${data.type}, screenshotSize=${data.screenshot.length}`);
-    } else {
-      console.log(`[BROADCAST] Emitting event for sessionId=${sessionId}, orgId=${data.orgId}, type=${data.type}, no screenshot`);
-    }
     
-    // Log significant events (but not screenshot data to avoid log pollution)
-    if (data.type === 'status' && (data.status === 'completed' || data.status === 'error')) {
-      const logData = { ...data };
-      if (logData.screenshot) {
-        logData.screenshot = `[SCREENSHOT:${logData.screenshot.length}bytes]`;
+    // Validate screenshot before sending
+    if (data.screenshot) {
+      const isValidScreenshot = validateScreenshotData(data.screenshot);
+      if (!isValidScreenshot) {
+        console.warn('Invalid screenshot data detected, removing from broadcast');
+        delete data.screenshot;
       }
-      console.log(`Status Update: ${data.orgId} - ${data.status}: ${data.message}`);
     }
     
     // Send to SSE clients
     const client = sseClients.get(sessionId);
     if (client && !client.destroyed) {
       try {
-        // Handle large screenshots by chunking or separate transmission
+        // Handle large screenshots by chunking
         if (data.screenshot && data.screenshot.length >= 100000) {
-          console.log(`Large screenshot detected: ${data.screenshot.length} bytes, sending separately`);
           // Send status without screenshot first
           const statusWithoutScreenshot = { ...data };
           delete statusWithoutScreenshot.screenshot;
           client.write(`data: ${JSON.stringify(statusWithoutScreenshot)}\n\n`);
-          // Add a short delay before sending the screenshot event
+          
+          // Send screenshot separately after a short delay
           setTimeout(() => {
             try {
               client.write(`data: ${JSON.stringify({ 
                 type: 'screenshot',
                 orgId: data.orgId,
                 upgradeId: data.upgradeId,
-                status: data.status, // Add status for context
-                message: data.message, // Add message for context
+                status: data.status,
+                message: data.message,
                 screenshot: data.screenshot 
               })}\n\n`);
             } catch (chunkError) {
@@ -265,7 +317,7 @@ function broadcastStatus(sessionId, data) {
                 orgId: data.orgId,
                 upgradeId: data.upgradeId,
                 status: 'error',
-                message: 'Screenshot captured but transmission failed - check server logs'
+                message: 'Screenshot captured but transmission failed'
               })}\n\n`);
             }
           }, 100); // 100ms delay
@@ -330,10 +382,7 @@ async function acquireBrowser() {
       browserOptions.executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
     }
     
-    console.log(`Launching browser with options...`);
     const browser = await chromium.launch(browserOptions);
-    
-    console.log(`Browser launched successfully. Active browsers: ${activeBrowserCount}`);
     return browser;
   } catch (error) {
     activeBrowserCount--;
@@ -347,7 +396,6 @@ async function releaseBrowser(browser) {
   
   try {
     await browser.close();
-    console.log(`Browser closed. Active browsers: ${activeBrowserCount - 1}`);
   } catch (error) {
     console.error('Error closing browser:', error);
   } finally {
@@ -379,7 +427,6 @@ app.get('/', (req, res) => {
       { path: '/api/upgrade', method: 'POST', description: 'Single org upgrade' },
       { path: '/api/upgrade-batch', method: 'POST', description: 'Batch upgrade' },
       { path: '/api/confirm-upgrade', method: 'POST', description: 'Confirm upgrade version' },
-      { path: '/api/test-screenshot', method: 'POST', description: 'Test server screenshot capture' },
       { path: '/api/history', method: 'GET', description: 'Upgrade history' },
       { path: '/api/status/:sessionId', method: 'GET', description: 'Status updates (polling)' },
       { path: '/api/status-stream/:sessionId', method: 'GET', description: 'Status updates (SSE)' }
@@ -407,7 +454,6 @@ app.get('/api/status-stream/:sessionId', authenticate, asyncHandler(async (req, 
   res.setHeader('Access-Control-Allow-Origin', '*');
   
   sseClients.set(sessionId, res);
-  console.log(`SSE client connected: ${sessionId}. Total clients: ${sseClients.size}`);
   
   // Send initial connection
   res.write(`data: ${JSON.stringify({ type: 'connected', timestamp: Date.now() })}\n\n`);
@@ -430,7 +476,6 @@ app.get('/api/status-stream/:sessionId', authenticate, asyncHandler(async (req, 
   const cleanup = () => {
     clearInterval(heartbeat);
     sseClients.delete(sessionId);
-    console.log(`SSE client disconnected: ${sessionId}. Total clients: ${sseClients.size}`);
   };
   
   req.on('close', cleanup);
@@ -476,8 +521,6 @@ app.post('/api/confirm-upgrade', authenticate, asyncHandler(async (req, res) => 
       confirmed,
       timestamp: Date.now()
     });
-    
-    console.log(`User confirmation received for ${upgradeId}: ${confirmed ? 'approved' : 'cancelled'}`);
     
     res.json({ 
       message: `Upgrade ${confirmed ? 'confirmed' : 'cancelled'}`,
@@ -537,223 +580,6 @@ app.get('/api/history', authenticate, asyncHandler(async (req, res) => {
       total: 0,
       limit: 50,
       offset: 0
-    });
-  }
-}));
-
-// Force error with screenshot for testing
-app.post('/api/force-error-screenshot', authenticate, asyncHandler(async (req, res) => {
-  const { sessionId, orgId } = req.body;
-  
-  if (!sessionId || !orgId) {
-    return res.status(400).json({ 
-      error: 'Validation error',
-      message: 'Missing required fields: sessionId, orgId'
-    });
-  }
-  
-  try {
-    // Create a test screenshot
-    const testScreenshot = await createTestScreenshot();
-    
-    // Send error status with screenshot
-    broadcastStatus(sessionId, {
-      type: 'status',
-      orgId: orgId,
-      upgradeId: 'force-error-test',
-      status: 'error',
-      message: 'Forced error for screenshot testing - this is a test error',
-      screenshot: testScreenshot
-    });
-    
-    res.json({ 
-      message: 'Forced error with screenshot sent',
-      screenshotSize: testScreenshot.length
-    });
-    
-  } catch (error) {
-    console.error('Error forcing screenshot:', error);
-    res.status(500).json({ 
-      error: 'Server error',
-      message: error.message
-    });
-  }
-}));
-
-async function createTestScreenshot() {
-  // Create a simple HTML page and screenshot it
-  const browser = await acquireBrowser();
-  const context = await browser.newContext({
-    viewport: { width: 800, height: 600 }
-  });
-  const page = await context.newPage();
-  
-  try {
-    // Create a test error page
-    await page.setContent(`
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>Test Error Page</title>
-        <style>
-          body { font-family: Arial, sans-serif; padding: 20px; background: #f5f5f5; }
-          .error { background: #ffebee; border: 2px solid #f44336; padding: 20px; border-radius: 8px; }
-          .error h1 { color: #d32f2f; margin-top: 0; }
-          .timestamp { color: #666; font-size: 12px; margin-top: 10px; }
-        </style>
-      </head>
-      <body>
-        <div class="error">
-          <h1>🚨 Test Error</h1>
-          <p><strong>Error:</strong> This is a simulated error for testing screenshot capture functionality.</p>
-          <p><strong>Package ID:</strong> 04tTEST123456789</p>
-          <p><strong>Organization:</strong> Test Org</p>
-          <p><strong>Status:</strong> Screenshot capture is working correctly!</p>
-          <div class="timestamp">Generated: ${new Date().toISOString()}</div>
-        </div>
-      </body>
-      </html>
-    `);
-    
-    const screenshot = await page.screenshot({ 
-      encoding: 'base64',
-      fullPage: false,
-      type: 'png'
-    });
-    
-    return `data:image/png;base64,${screenshot}`;
-    
-  } finally {
-    await context.close();
-    await releaseBrowser(browser);
-  }
-}
-
-// Manual screenshot test endpoint for debugging
-app.post('/api/test-screenshot', authenticate, asyncHandler(async (req, res) => {
-  const { orgId, sessionId } = req.body;
-  if (!orgId || !sessionId) {
-    return res.status(400).json({ 
-      error: 'Validation error',
-      message: 'Missing required fields: orgId, sessionId'
-    });
-  }
-  try {
-    const config = await loadOrgConfig();
-    const org = config.orgs.find(o => o.id === orgId);
-    if (!org) {
-      return res.status(404).json({ 
-        error: 'Not found',
-        message: `Organization ${orgId} not found`
-      });
-    }
-    console.log(`Testing screenshot for org: ${org.name}`);
-    const browser = await acquireBrowser();
-    const context = await browser.newContext({
-      viewport: { width: 1366, height: 768 },
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    });
-    const page = await context.newPage();
-    try {
-      await page.setContent(`
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <title>Package Installation Error - Salesforce</title>
-          <style>
-            body { font-family: 'Salesforce Sans', Arial, sans-serif; margin: 0; padding: 20px; background: #f3f2f2; }
-            .slds-scope { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-            .error-header { background: #c23934; color: white; padding: 15px; margin: -20px -20px 20px -20px; border-radius: 8px 8px 0 0; }
-            .error-content { line-height: 1.6; }
-            .package-info { background: #f8f9fa; padding: 15px; border-left: 4px solid #0176d3; margin: 15px 0; }
-            .timestamp { color: #666; font-size: 12px; margin-top: 20px; border-top: 1px solid #ddd; padding-top: 10px; }
-            .code { font-family: monospace; background: #f1f1f1; padding: 2px 4px; border-radius: 3px; }
-          </style>
-        </head>
-        <body>
-          <div class="slds-scope">
-            <div class="error-header">
-              <h1>⚠️ Package Installation Failed</h1>
-            </div>
-            <div class="error-content">
-              <p><strong>Organization:</strong> ${org.name}</p>
-              <p><strong>Error:</strong> This is a <em>simulated error</em> to test screenshot capture functionality.</p>
-              <div class="package-info">
-                <h3>Package Details</h3>
-                <p><strong>Package ID:</strong> <span class="code">04tTEST123456789</span></p>
-                <p><strong>Version:</strong> 1.0.0.BETA</p>
-                <p><strong>Status:</strong> ❌ Installation Failed</p>
-              </div>
-              <p><strong>Possible Causes:</strong></p>
-              <ul>
-                <li>Missing required permissions</li>
-                <li>Package dependencies not met</li>
-                <li>Custom objects conflict</li>
-                <li>Validation rules blocking installation</li>
-              </ul>
-              <p><strong>Screenshot Test Status:</strong> ✅ Server-side screenshot capture is working correctly!</p>
-              <div class="timestamp">
-                Screenshot captured: ${new Date().toLocaleString()}<br>
-                Server: Cloud Run Instance<br>
-                Browser: Chromium ${process.version}
-              </div>
-            </div>
-          </div>
-        </body>
-        </html>
-      `);
-      // Wait longer for page to render
-      await page.waitForTimeout(2000);
-      let screenshot = await page.screenshot({ encoding: 'base64', fullPage: true, type: 'png' });
-      if (Buffer.isBuffer(screenshot)) {
-        screenshot = screenshot.toString('base64');
-      }
-      let screenshotData = `data:image/png;base64,${screenshot}`;
-      // Validate screenshot
-      let isValid = typeof screenshot === 'string' && screenshot.length > 0 && !screenshot.includes('\n') && !screenshot.includes('\r');
-      if (!isValid) {
-        console.warn('First screenshot invalid, retrying after extra wait...');
-        await page.waitForTimeout(2000);
-        screenshot = await page.screenshot({ encoding: 'base64', fullPage: true, type: 'png' });
-        if (Buffer.isBuffer(screenshot)) {
-          screenshot = screenshot.toString('base64');
-        }
-        screenshotData = `data:image/png;base64,${screenshot}`;
-        isValid = typeof screenshot === 'string' && screenshot.length > 0 && !screenshot.includes('\n') && !screenshot.includes('\r');
-      }
-      if (isValid) {
-        console.log(`✅ Test screenshot captured: ${screenshot.length} bytes (base64)`);
-        console.log(`✅ Data URL length: ${screenshotData.length} bytes`);
-        console.log(`Preview: ${typeof screenshot === 'string' ? screenshot.substring(0, 80) : '[not a string]'}...`);
-      } else {
-        console.error('❌ Invalid screenshot data detected after retry');
-        console.error('Screenshot length:', screenshot ? screenshot.length : 0);
-        console.error('Screenshot preview:', typeof screenshot === 'string' ? screenshot.substring(0, 80) : '[not a string]');
-        throw new Error('Screenshot data validation failed');
-      }
-      broadcastStatus(sessionId, {
-        type: 'status',
-        orgId: org.id,
-        upgradeId: 'server-screenshot-test',
-        status: 'error',
-        message: `Server screenshot test completed successfully for ${org.name}`,
-        screenshot: screenshotData
-      });
-      res.json({ 
-        success: true,
-        message: 'Server screenshot test completed and sent via status updates',
-        screenshotSize: screenshot.length,
-        orgName: org.name
-      });
-    } finally {
-      await context.close();
-      await releaseBrowser(browser);
-    }
-  } catch (error) {
-    console.error('Error capturing test screenshot:', error);
-    res.status(500).json({ 
-      error: 'Server error',
-      message: error.message
     });
   }
 }));
@@ -844,8 +670,8 @@ app.post('/api/upgrade-batch', authenticate, validatePackageId, asyncHandler(asy
     });
   }
   
-  // Limit concurrent for Cloud Run
-  const limitedConcurrent = Math.min(Math.max(1, maxConcurrent), 2);
+  // Limit concurrent for resource management
+  const limitedConcurrent = Math.min(Math.max(1, maxConcurrent), 4);
   
   try {
     const config = await loadOrgConfig();
@@ -910,12 +736,53 @@ async function runBatchUpgradeParallel(orgs, packageUrl, sessionId, batchId, max
   let completedCount = 0;
   const results = [];
   
-  // Process orgs sequentially for better resource management
-  for (const org of orgs) {
-    const upgradeId = `${batchId}-${org.id}`;
-    const orgStartTime = Date.now();
-    
-    try {
+  // Process orgs with concurrency control
+  const processingQueue = [...orgs];
+  const activeProcesses = [];
+  
+  while (processingQueue.length > 0 || activeProcesses.length > 0) {
+    // Start new processes up to maxConcurrent
+    while (activeProcesses.length < maxConcurrent && processingQueue.length > 0) {
+      const org = processingQueue.shift();
+      const upgradeId = `${batchId}-${org.id}`;
+      const orgStartTime = Date.now();
+      
+      const processPromise = upgradePackage(org, packageUrl, sessionId, upgradeId, batchId)
+        .then(() => {
+          successCount++;
+          results.push({ 
+            orgId: org.id, 
+            orgName: org.name,
+            status: 'success',
+            duration: Math.round((Date.now() - orgStartTime) / 1000)
+          });
+        })
+        .catch(error => {
+          console.error(`Batch upgrade error for ${org.name}:`, error);
+          failureCount++;
+          results.push({ 
+            orgId: org.id, 
+            orgName: org.name,
+            status: 'failed', 
+            error: error.message,
+            duration: Math.round((Date.now() - orgStartTime) / 1000)
+          });
+        })
+        .finally(() => {
+          completedCount++;
+          broadcastStatus(sessionId, {
+            type: 'batch-progress',
+            batchId,
+            completed: completedCount,
+            total: orgs.length,
+            successCount,
+            failureCount,
+            percentComplete: Math.round((completedCount / orgs.length) * 100)
+          });
+        });
+      
+      activeProcesses.push(processPromise);
+      
       broadcastStatus(sessionId, {
         type: 'batch-progress',
         batchId,
@@ -927,43 +794,19 @@ async function runBatchUpgradeParallel(orgs, packageUrl, sessionId, batchId, max
         successCount,
         failureCount
       });
+    }
+    
+    // Wait for at least one process to complete
+    if (activeProcesses.length > 0) {
+      const completedIndex = await Promise.race(
+        activeProcesses.map((p, i) => p.then(() => i))
+      );
+      activeProcesses.splice(completedIndex, 1);
       
-      await upgradePackage(org, packageUrl, sessionId, upgradeId, batchId);
-      successCount++;
-      results.push({ 
-        orgId: org.id, 
-        orgName: org.name,
-        status: 'success',
-        duration: Math.round((Date.now() - orgStartTime) / 1000)
-      });
-      
-    } catch (error) {
-      console.error(`Batch upgrade error for ${org.name}:`, error);
-      failureCount++;
-      results.push({ 
-        orgId: org.id, 
-        orgName: org.name,
-        status: 'failed', 
-        error: error.message,
-        duration: Math.round((Date.now() - orgStartTime) / 1000)
-      });
-    } finally {
-      completedCount++;
-      
-      // Add small delay between orgs to reduce resource pressure
-      if (completedCount < orgs.length) {
+      // Add small delay between processes to reduce resource pressure
+      if (processingQueue.length > 0) {
         await new Promise(resolve => setTimeout(resolve, 2000));
       }
-      
-      broadcastStatus(sessionId, {
-        type: 'batch-progress',
-        batchId,
-        completed: completedCount,
-        total: orgs.length,
-        successCount,
-        failureCount,
-        percentComplete: Math.round((completedCount / orgs.length) * 100)
-      });
     }
   }
   
@@ -1028,10 +871,7 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
         ignoreHTTPSErrors: true,
         locale: 'en-US',
         timezoneId: 'America/New_York',
-        // Add permissions for clipboard, notifications etc
         permissions: ['clipboard-read', 'clipboard-write'],
-        // Disable images to speed up loading
-        // Remove this if screenshots are needed of the actual content
         bypassCSP: true,
         javaScriptEnabled: true
       });
@@ -1041,23 +881,6 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       context.setDefaultNavigationTimeout(30000);
       
       page = await context.newPage();
-      
-      // Enable console logging for debugging
-      page.on('console', msg => {
-        if (msg.type() === 'error') {
-          console.log(`Browser console error: ${msg.text()}`);
-        }
-      });
-      
-      // Log page crashes
-      page.on('crash', () => {
-        console.error('Page crashed!');
-      });
-      
-      // Log page errors
-      page.on('pageerror', error => {
-        console.error(`Page error: ${error.message}`);
-      });
       
       // Set extra headers
       await page.setExtraHTTPHeaders({
@@ -1076,7 +899,6 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       });
       
       try {
-        console.log(`Navigating to: ${org.url}`);
         const response = await page.goto(org.url, { 
           waitUntil: 'domcontentloaded',
           timeout: PAGE_LOAD_TIMEOUT 
@@ -1099,7 +921,6 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
           // Try to find Salesforce login link
           const loginLink = await page.$('a[href*="/login"], a[href*="login.salesforce.com"]');
           if (loginLink) {
-            console.log('Found login link, clicking...');
             await loginLink.click();
             await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 });
           } else {
@@ -1107,7 +928,6 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
             const loginUrl = org.url.includes('my.salesforce.com') 
               ? org.url 
               : org.url.replace('lightning.force.com', 'my.salesforce.com');
-            console.log(`No login form found, navigating to: ${loginUrl}`);
             await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: PAGE_LOAD_TIMEOUT });
           }
         }
@@ -1115,14 +935,9 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       } catch (error) {
         // Capture screenshot of navigation failure
         try {
-          const navErrorScreenshot = await page.screenshot({ 
-            encoding: 'base64',
-            fullPage: false,
-            type: 'png'
-          });
-          failureScreenshot = `data:image/png;base64,${navErrorScreenshot}`;
+          failureScreenshot = await captureScreenshot(page, 'png');
         } catch (e) {
-          console.log('Failed to capture navigation error screenshot:', e.message);
+          // Silent fail
         }
         
         throw new Error(`Failed to load ${org.name}: ${error.message}`);
@@ -1150,21 +965,7 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
         await page.locator('#password').clear();
         await page.locator('#password').fill(org.password);
         
-        // Take screenshot before login for debugging
-        console.log('Taking pre-login screenshot...');
-        try {
-          const preLoginScreenshot = await page.screenshot({ 
-            encoding: 'base64',
-            fullPage: false,
-            type: 'png'
-          });
-          console.log('Pre-login screenshot captured:', preLoginScreenshot.length, 'bytes');
-        } catch (e) {
-          console.log('Pre-login screenshot failed:', e.message);
-        }
-        
         // Click login button and wait for navigation
-        console.log('Clicking login button...');
         const navigationPromise = page.waitForNavigation({ 
           waitUntil: 'domcontentloaded',
           timeout: 30000 
@@ -1173,7 +974,6 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
         await page.click('#Login');
         
         // Wait for navigation to complete
-        console.log('Waiting for navigation after login...');
         await navigationPromise;
         
         // Additional wait to ensure page is stable
@@ -1181,7 +981,6 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
         
         // Check current URL to detect login status
         const currentUrl = page.url();
-        console.log('Current URL after login:', currentUrl);
         
         // Check if we're still on login page (login failed)
         if (currentUrl.includes('/login') || currentUrl.includes('AuthPage')) {
@@ -1197,15 +996,9 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       } catch (error) {
         // Capture screenshot on login failure
         try {
-          const loginErrorScreenshot = await page.screenshot({ 
-            encoding: 'base64',
-            fullPage: false,
-            type: 'png'
-          });
-          failureScreenshot = `data:image/png;base64,${loginErrorScreenshot}`;
-          console.log('Login error screenshot captured:', loginErrorScreenshot.length, 'bytes');
+          failureScreenshot = await captureScreenshot(page, 'png');
         } catch (e) {
-          console.log('Failed to capture login error screenshot:', e.message);
+          // Silent fail
         }
         
         throw new Error(`Login failed: ${error.message}`);
@@ -1222,19 +1015,13 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       
       // Step 4: Check for verification
       const currentUrl = page.url();
-      console.log('Post-login URL:', currentUrl);
       
       if (currentUrl.includes('verify') || currentUrl.includes('challenge') || currentUrl.includes('2fa')) {
         // Capture screenshot of verification page
         try {
-          const verifyScreenshot = await page.screenshot({ 
-            encoding: 'base64',
-            fullPage: false,
-            type: 'png'
-          });
-          failureScreenshot = `data:image/png;base64,${verifyScreenshot}`;
+          failureScreenshot = await captureScreenshot(page, 'png');
         } catch (e) {
-          console.log('Failed to capture verification screenshot:', e.message);
+          // Silent fail
         }
         
         broadcastStatus(sessionId, { 
@@ -1267,15 +1054,9 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       if (!isLoggedIn) {
         // Capture screenshot of unexpected page
         try {
-          const unexpectedPageScreenshot = await page.screenshot({ 
-            encoding: 'base64',
-            fullPage: false,
-            type: 'png'
-          });
-          failureScreenshot = `data:image/png;base64,${unexpectedPageScreenshot}`;
-          console.log('Unexpected page screenshot captured');
+          failureScreenshot = await captureScreenshot(page, 'png');
         } catch (e) {
-          console.log('Failed to capture unexpected page screenshot:', e.message);
+          // Silent fail
         }
         
         throw new Error(`Login succeeded but reached unexpected page: ${currentUrl}`);
@@ -1343,11 +1124,8 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
             headerMessage: headerMessage.trim(),
             fullText: upgradeText.trim()
           };
-          
-          console.log('Extracted version info:', versionInfo);
         }
       } catch (error) {
-        console.log('Could not extract version info:', error.message);
         // Continue without version info if extraction fails
       }
       
@@ -1369,7 +1147,7 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
         
         const confirmationTimeout = setTimeout(() => {
           if (!confirmationReceived) {
-            console.log('Version confirmation timeout for', org.name);
+            // Timeout silently
           }
         }, VERIFICATION_TIMEOUT);
         
@@ -1377,7 +1155,7 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
         for (let i = 0; i < 120; i++) { // 2 minutes max wait
           await new Promise(resolve => setTimeout(resolve, 1000));
           
-          // Check if confirmation was received (this would be set via another API endpoint)
+          // Check if confirmation was received
           const confirmationKey = `${sessionId}-${upgradeId}-confirmation`;
           const confirmation = statusStore.get(confirmationKey);
           
@@ -1418,18 +1196,12 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
         message: 'Looking for upgrade button...' 
       });
       
-      // CAPTURE SCREENSHOT OF UPGRADE PAGE FOR DEBUGGING
+      // Capture screenshot of upgrade page for debugging
       let upgradePageScreenshot = null;
       try {
-        const screenshot = await page.screenshot({ 
-          encoding: 'base64',
-          fullPage: true,
-          type: 'png'
-        });
-        upgradePageScreenshot = `data:image/png;base64,${screenshot}`;
-        console.log('📸 Upgrade page screenshot captured for reference:', screenshot.length, 'bytes');
+        upgradePageScreenshot = await captureScreenshot(page, 'png');
       } catch (e) {
-        console.log('Failed to capture upgrade page screenshot:', e.message);
+        // Silent fail
       }
       
       let buttonClicked = false;
@@ -1448,10 +1220,9 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
           await page.waitForSelector(strategy.selector, { timeout: 5000 });
           await page.click(strategy.selector);
           buttonClicked = true;
-          console.log(`Clicked upgrade button using: ${strategy.name}`);
           break;
         } catch (error) {
-          console.log(`Strategy failed: ${strategy.name}`);
+          // Try next strategy
         }
       }
       
@@ -1461,9 +1232,8 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
           const upgradeButton = await page.getByRole('button', { name: /upgrade/i });
           await upgradeButton.click();
           buttonClicked = true;
-          console.log('Clicked upgrade button using role selector');
         } catch (error) {
-          console.log('Role selector failed');
+          // Failed
         }
       }
       
@@ -1471,31 +1241,13 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
         // Use the upgrade page screenshot we captured earlier
         if (upgradePageScreenshot) {
           failureScreenshot = upgradePageScreenshot;
-          console.log('📸 Using upgrade page screenshot for button not found error');
         } else {
           // Take screenshot for debugging before throwing error
           try {
-            console.log('Taking debug screenshot - upgrade button not found');
-            const screenshot = await page.screenshot({ 
-              encoding: 'base64',
-              fullPage: true,
-              type: 'png'
-            });
-            failureScreenshot = `data:image/png;base64,${screenshot}`;
-            console.log('Debug screenshot captured:', screenshot.length, 'bytes');
+            failureScreenshot = await captureScreenshot(page, 'png');
           } catch (e) {
-            console.error('Failed to capture debug screenshot:', e.message);
+            // Silent fail
           }
-        }
-        
-        // Also capture the page content for debugging
-        try {
-          const pageContent = await page.content();
-          console.log('Page content length:', pageContent.length);
-          console.log('Page title:', await page.title());
-          console.log('Current URL:', page.url());
-        } catch (e) {
-          console.log('Failed to get page details:', e.message);
         }
         
         throw new Error('Upgrade button not found after trying all strategies');
@@ -1549,16 +1301,9 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
           
           // Capture screenshot of error state
           try {
-            const screenshot = await page.screenshot({ 
-              encoding: 'base64',
-              fullPage: false,
-              type: 'jpeg',
-              quality: 80
-            });
-            failureScreenshot = `data:image/jpeg;base64,${screenshot}`;
-            console.log('Error screenshot captured:', screenshot.length, 'bytes');
+            failureScreenshot = await captureScreenshot(page, 'jpeg', 80);
           } catch (e) {
-            console.error('Failed to capture error screenshot:', e.message);
+            // Silent fail
           }
           
           // Extract error message if possible
@@ -1599,60 +1344,38 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       }
       
     } catch (error) {
-      // ENHANCED ERROR HANDLING WITH GUARANTEED SCREENSHOT CAPTURE
+      // Enhanced error handling with guaranteed screenshot capture
       console.error(`Upgrade attempt failed for ${org.name}:`, error.message);
       
       // Force screenshot capture on ANY error
       if (page) {
-        console.log('FORCING screenshot capture due to error...');
         try {
           // Try multiple screenshot strategies
           let screenshotCaptured = false;
           
-          // Strategy 1: Full page PNG
+          // Strategy 1: PNG screenshot
           if (!screenshotCaptured) {
             try {
-              const screenshot = await page.screenshot({ 
-                encoding: 'base64',
-                fullPage: true,
-                type: 'png',
-                timeout: 15000
-              });
-              failureScreenshot = `data:image/png;base64,${screenshot}`;
-              console.log('✅ FULL PAGE PNG screenshot captured:', screenshot.length, 'bytes');
-              screenshotCaptured = true;
+              failureScreenshot = await captureScreenshot(page, 'png');
+              if (failureScreenshot) screenshotCaptured = true;
             } catch (e) {
-              console.log('❌ Full page PNG failed:', e.message);
+              // Silent fail
             }
           }
           
-          // Strategy 2: Viewport PNG
+          // Strategy 2: JPEG screenshot (smaller file, might work better)
           if (!screenshotCaptured) {
             try {
-              const screenshot = await page.screenshot({ 
-                encoding: 'base64',
-                fullPage: false,
-                type: 'jpeg',
-                quality: 90,
-                timeout: 5000
-              });
-              failureScreenshot = `data:image/jpeg;base64,${screenshot}`;
-              console.log('✅ VIEWPORT JPEG screenshot captured:', screenshot.length, 'bytes');
-              screenshotCaptured = true;
+              failureScreenshot = await captureScreenshot(page, 'jpeg', 80);
+              if (failureScreenshot) screenshotCaptured = true;
             } catch (e) {
-              console.log('❌ Viewport JPEG failed:', e.message);
+              // Silent fail
             }
-          }
-          
-          if (!screenshotCaptured) {
-            console.error('🚨 ALL SCREENSHOT STRATEGIES FAILED');
           }
           
         } catch (screenshotError) {
-          console.error('🚨 Critical screenshot capture error:', screenshotError.message);
+          // Silent fail
         }
-      } else {
-        console.warn('⚠️ No page object available for screenshot capture');
       }
       
       // Retry logic for specific errors
@@ -1663,7 +1386,6 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
            error.message.includes('timeout'))) {
         
         retryCount++;
-        console.log(`Retrying upgrade for ${org.name} (attempt ${retryCount + 1}/${config.max_retries + 1})`);
         
         // Clean up before retry
         await releaseBrowser(browser);
@@ -1697,16 +1419,13 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
         message: `Error: ${error.message}`
       };
       
-      // Only attach screenshot if valid (non-empty string and matches data URL format)
+      // Only attach screenshot if valid
       if (
         typeof failureScreenshot === 'string' &&
         failureScreenshot.length > 30 &&
         /^data:image\/[a-zA-Z]+;base64,/.test(failureScreenshot)
       ) {
         statusUpdate.screenshot = failureScreenshot;
-        console.log('Broadcasting error status with screenshot, size:', failureScreenshot.length);
-      } else {
-        console.log('Broadcasting error status without screenshot');
       }
       
       broadcastStatus(sessionId, statusUpdate);
@@ -1717,21 +1436,12 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       // Always save history with screenshot info
       await addToHistory(historyEntry);
       
-      // Debug log the final history entry
-      console.log('Final history entry:', {
-        id: historyEntry.id,
-        status: historyEntry.status,
-        error: historyEntry.error,
-        hasScreenshot: !!historyEntry.screenshot,
-        screenshotSize: historyEntry.screenshot ? historyEntry.screenshot.length : 0
-      });
-      
       // Cleanup with proper error handling
       if (page) {
         try {
           await page.close();
         } catch (e) {
-          console.error('Error closing page:', e.message);
+          // Silent fail
         }
       }
       
@@ -1739,7 +1449,7 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
         try {
           await context.close();
         } catch (e) {
-          console.error('Error closing context:', e.message);
+          // Silent fail
         }
       }
       
@@ -1774,18 +1484,14 @@ setInterval(() => {
     }
   }
   
-  if (cleaned > 0) {
+  if (cleaned > 0 && config.node_env === 'development') {
     console.log(`Cleanup: removed ${cleaned} stale entries`);
   }
-  
-  // Log memory usage
-  const memUsage = process.memoryUsage();
-  console.log(`Memory usage: RSS ${Math.round(memUsage.rss / 1024 / 1024)}MB, Heap ${Math.round(memUsage.heapUsed / 1024 / 1024)}MB`);
 }, CLEANUP_INTERVAL);
 
 // Global error handler
 app.use((err, req, res, next) => {
-  console.error(`[${new Date().toISOString()}] Error:`, err);
+  console.error('Error:', err.message);
   
   // Handle CORS errors
   if (err.message && err.message.includes('CORS')) {
@@ -1856,7 +1562,6 @@ async function shutdown(signal) {
   }
   
   // Save any pending history
-  console.log('Saving history...');
   const history = await loadHistory();
   await saveHistory(history);
   
@@ -1893,5 +1598,4 @@ server = app.listen(PORT, '0.0.0.0', () => {
   `);
 });
 
-// Export for testing
 module.exports = { app, server };
