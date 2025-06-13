@@ -302,7 +302,7 @@ async function acquireBrowser() {
   activeBrowserCount++;
   
   try {
-    const browser = await chromium.launch({
+    const browserOptions = {
       headless: true,
       args: [
         '--no-sandbox',
@@ -311,22 +311,33 @@ async function acquireBrowser() {
         '--disable-accelerated-2d-canvas',
         '--no-first-run',
         '--no-zygote',
-        '--single-process',
         '--disable-gpu',
         '--disable-blink-features=AutomationControlled',
         '--disable-web-security',
         '--disable-features=IsolateOrigins,site-per-process',
         '--disable-site-isolation-trials',
         '--memory-pressure-off',
-        '--max_old_space_size=512'
+        '--max_old_space_size=512',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding'
       ],
       timeout: BROWSER_LAUNCH_TIMEOUT
-    });
+    };
     
-    console.log(`Browser launched. Active browsers: ${activeBrowserCount}`);
+    // Add executable path for different environments
+    if (process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH) {
+      browserOptions.executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
+    }
+    
+    console.log(`Launching browser with options...`);
+    const browser = await chromium.launch(browserOptions);
+    
+    console.log(`Browser launched successfully. Active browsers: ${activeBrowserCount}`);
     return browser;
   } catch (error) {
     activeBrowserCount--;
+    console.error('Browser launch error:', error);
     throw new Error(`Failed to launch browser: ${error.message}`);
   }
 }
@@ -1016,10 +1027,37 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         ignoreHTTPSErrors: true,
         locale: 'en-US',
-        timezoneId: 'America/New_York'
+        timezoneId: 'America/New_York',
+        // Add permissions for clipboard, notifications etc
+        permissions: ['clipboard-read', 'clipboard-write'],
+        // Disable images to speed up loading
+        // Remove this if screenshots are needed of the actual content
+        bypassCSP: true,
+        javaScriptEnabled: true
       });
       
+      // Set default timeout for all actions
+      context.setDefaultTimeout(30000);
+      context.setDefaultNavigationTimeout(30000);
+      
       page = await context.newPage();
+      
+      // Enable console logging for debugging
+      page.on('console', msg => {
+        if (msg.type() === 'error') {
+          console.log(`Browser console error: ${msg.text()}`);
+        }
+      });
+      
+      // Log page crashes
+      page.on('crash', () => {
+        console.error('Page crashed!');
+      });
+      
+      // Log page errors
+      page.on('pageerror', error => {
+        console.error(`Page error: ${error.message}`);
+      });
       
       // Set extra headers
       await page.setExtraHTTPHeaders({
@@ -1038,11 +1076,55 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       });
       
       try {
-        await page.goto(org.url, { 
-          waitUntil: 'networkidle',
+        console.log(`Navigating to: ${org.url}`);
+        const response = await page.goto(org.url, { 
+          waitUntil: 'domcontentloaded',
           timeout: PAGE_LOAD_TIMEOUT 
         });
+        
+        // Check if navigation was successful
+        if (!response || !response.ok()) {
+          throw new Error(`Failed to load page: ${response ? response.status() : 'No response'}`);
+        }
+        
+        // Wait a bit for any redirects
+        await page.waitForTimeout(2000);
+        
+        // Check if we landed on a login page
+        const hasLoginForm = await page.evaluate(() => {
+          return !!(document.querySelector('#username') || document.querySelector('#Username'));
+        });
+        
+        if (!hasLoginForm) {
+          // Try to find Salesforce login link
+          const loginLink = await page.$('a[href*="/login"], a[href*="login.salesforce.com"]');
+          if (loginLink) {
+            console.log('Found login link, clicking...');
+            await loginLink.click();
+            await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 });
+          } else {
+            // Navigate directly to login page
+            const loginUrl = org.url.includes('my.salesforce.com') 
+              ? org.url 
+              : org.url.replace('lightning.force.com', 'my.salesforce.com');
+            console.log(`No login form found, navigating to: ${loginUrl}`);
+            await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: PAGE_LOAD_TIMEOUT });
+          }
+        }
+        
       } catch (error) {
+        // Capture screenshot of navigation failure
+        try {
+          const navErrorScreenshot = await page.screenshot({ 
+            encoding: 'base64',
+            fullPage: false,
+            type: 'png'
+          });
+          failureScreenshot = `data:image/png;base64,${navErrorScreenshot}`;
+        } catch (e) {
+          console.log('Failed to capture navigation error screenshot:', e.message);
+        }
+        
         throw new Error(`Failed to load ${org.name}: ${error.message}`);
       }
       
@@ -1057,27 +1139,75 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       });
       
       try {
+        // Wait for login form
         await page.waitForSelector('#username', { timeout: 15000 });
-        await page.fill('#username', org.username);
-        await page.fill('#password', org.password);
         
-        // Click login with improved retry logic
-        let loginClicked = false;
-        for (let i = 0; i < 3; i++) {
-          try {
-            await page.click('#Login');
-            loginClicked = true;
-            break;
-          } catch (error) {
-            if (i === 2) throw new Error('Failed to click login button after 3 attempts');
-            await page.waitForTimeout(1000);
-          }
+        // Clear and fill username
+        await page.locator('#username').clear();
+        await page.locator('#username').fill(org.username);
+        
+        // Clear and fill password
+        await page.locator('#password').clear();
+        await page.locator('#password').fill(org.password);
+        
+        // Take screenshot before login for debugging
+        console.log('Taking pre-login screenshot...');
+        try {
+          const preLoginScreenshot = await page.screenshot({ 
+            encoding: 'base64',
+            fullPage: false,
+            type: 'png'
+          });
+          console.log('Pre-login screenshot captured:', preLoginScreenshot.length, 'bytes');
+        } catch (e) {
+          console.log('Pre-login screenshot failed:', e.message);
         }
         
-        // Wait for navigation after login with better timeout
-        await page.waitForLoadState('networkidle', { timeout: PAGE_LOAD_TIMEOUT });
+        // Click login button and wait for navigation
+        console.log('Clicking login button...');
+        const navigationPromise = page.waitForNavigation({ 
+          waitUntil: 'domcontentloaded',
+          timeout: 30000 
+        });
+        
+        await page.click('#Login');
+        
+        // Wait for navigation to complete
+        console.log('Waiting for navigation after login...');
+        await navigationPromise;
+        
+        // Additional wait to ensure page is stable
+        await page.waitForTimeout(3000);
+        
+        // Check current URL to detect login status
+        const currentUrl = page.url();
+        console.log('Current URL after login:', currentUrl);
+        
+        // Check if we're still on login page (login failed)
+        if (currentUrl.includes('/login') || currentUrl.includes('AuthPage')) {
+          // Check for error messages
+          const errorElement = await page.$('.loginError, .error, [id*="error"]');
+          if (errorElement) {
+            const errorText = await errorElement.textContent();
+            throw new Error(`Login failed: ${errorText.trim()}`);
+          }
+          throw new Error('Login failed: Still on login page after submit');
+        }
         
       } catch (error) {
+        // Capture screenshot on login failure
+        try {
+          const loginErrorScreenshot = await page.screenshot({ 
+            encoding: 'base64',
+            fullPage: false,
+            type: 'png'
+          });
+          failureScreenshot = `data:image/png;base64,${loginErrorScreenshot}`;
+          console.log('Login error screenshot captured:', loginErrorScreenshot.length, 'bytes');
+        } catch (e) {
+          console.log('Failed to capture login error screenshot:', e.message);
+        }
+        
         throw new Error(`Login failed: ${error.message}`);
       }
       
@@ -1092,17 +1222,63 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       
       // Step 4: Check for verification
       const currentUrl = page.url();
+      console.log('Post-login URL:', currentUrl);
+      
       if (currentUrl.includes('verify') || currentUrl.includes('challenge') || currentUrl.includes('2fa')) {
+        // Capture screenshot of verification page
+        try {
+          const verifyScreenshot = await page.screenshot({ 
+            encoding: 'base64',
+            fullPage: false,
+            type: 'png'
+          });
+          failureScreenshot = `data:image/png;base64,${verifyScreenshot}`;
+        } catch (e) {
+          console.log('Failed to capture verification screenshot:', e.message);
+        }
+        
         broadcastStatus(sessionId, { 
           type: 'status',
           orgId: org.id,
           upgradeId,
           batchId,
           status: 'verification-required', 
-          message: 'Two-factor authentication required. Cannot proceed automatically.' 
+          message: 'Two-factor authentication required. Cannot proceed automatically.',
+          screenshot: failureScreenshot
         });
         
         throw new Error('Manual verification required - two-factor authentication detected');
+      }
+      
+      // Check if we successfully reached the main Salesforce interface
+      const isLoggedIn = await page.evaluate(() => {
+        // Check for common Salesforce UI elements
+        return !!(
+          document.querySelector('.slds-global-header') ||
+          document.querySelector('.oneHeader') ||
+          document.querySelector('.forceGlobalNav') ||
+          document.querySelector('#phHeader') ||
+          document.querySelector('.app-launcher') ||
+          window.location.href.includes('lightning.force.com') ||
+          window.location.href.includes('.my.salesforce.com')
+        );
+      });
+      
+      if (!isLoggedIn) {
+        // Capture screenshot of unexpected page
+        try {
+          const unexpectedPageScreenshot = await page.screenshot({ 
+            encoding: 'base64',
+            fullPage: false,
+            type: 'png'
+          });
+          failureScreenshot = `data:image/png;base64,${unexpectedPageScreenshot}`;
+          console.log('Unexpected page screenshot captured');
+        } catch (e) {
+          console.log('Failed to capture unexpected page screenshot:', e.message);
+        }
+        
+        throw new Error(`Login succeeded but reached unexpected page: ${currentUrl}`);
       }
       
       // Step 5: Navigate to package
@@ -1119,9 +1295,12 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       
       try {
         await page.goto(fullPackageUrl, { 
-          waitUntil: 'networkidle',
+          waitUntil: 'domcontentloaded',
           timeout: PAGE_LOAD_TIMEOUT 
         });
+        
+        // Wait for page to stabilize
+        await page.waitForTimeout(2000);
       } catch (error) {
         throw new Error(`Failed to load package page: ${error.message}`);
       }
@@ -1453,23 +1632,6 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
               const screenshot = await page.screenshot({ 
                 encoding: 'base64',
                 fullPage: false,
-                type: 'png',
-                timeout: 10000
-              });
-              failureScreenshot = `data:image/png;base64,${screenshot}`;
-              console.log('✅ VIEWPORT PNG screenshot captured:', screenshot.length, 'bytes');
-              screenshotCaptured = true;
-            } catch (e) {
-              console.log('❌ Viewport PNG failed:', e.message);
-            }
-          }
-          
-          // Strategy 3: Viewport JPEG (most compatible)
-          if (!screenshotCaptured) {
-            try {
-              const screenshot = await page.screenshot({ 
-                encoding: 'base64',
-                fullPage: false,
                 type: 'jpeg',
                 quality: 90,
                 timeout: 5000
@@ -1535,7 +1697,12 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
         message: `Error: ${error.message}`
       };
       
-      if (failureScreenshot) {
+      // Only attach screenshot if valid (non-empty string and matches data URL format)
+      if (
+        typeof failureScreenshot === 'string' &&
+        failureScreenshot.length > 30 &&
+        /^data:image\/[a-zA-Z]+;base64,/.test(failureScreenshot)
+      ) {
         statusUpdate.screenshot = failureScreenshot;
         console.log('Broadcasting error status with screenshot, size:', failureScreenshot.length);
       } else {

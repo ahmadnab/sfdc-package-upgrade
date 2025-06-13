@@ -927,7 +927,11 @@ const App: React.FC = () => {
     
     return (
       <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4" onClick={onClose}>
-        <div className="bg-white rounded-lg max-w-6xl max-h-[90vh] overflow-hidden" onClick={(e) => e.stopPropagation()}>
+        <div
+          className="bg-white rounded-lg w-full max-w-md sm:max-w-lg md:max-w-2xl max-h-[80vh] overflow-auto shadow-lg"
+          style={{ boxSizing: 'border-box' }}
+          onClick={(e) => e.stopPropagation()}
+        >
           <div className="flex justify-between items-center p-4 border-b">
             <h3 className="text-lg font-semibold">
               {isTestScreenshot ? 'Test Screenshot' : 'Error Screenshot'}
@@ -939,7 +943,7 @@ const App: React.FC = () => {
               ×
             </button>
           </div>
-          <div className="p-4 overflow-auto max-h-[calc(90vh-8rem)]">
+          <div className="p-4 overflow-auto" style={{ maxHeight: '60vh' }}>
             {!validation.isValid ? (
               <div className="text-center py-8">
                 <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
@@ -963,12 +967,12 @@ const App: React.FC = () => {
                 <p className="text-gray-600">
                   This is a test screenshot (2x2 red square). The screenshot capture and display system is working correctly.
                 </p>
-                <div className="mt-4 p-4 bg-gray-100 rounded">
+                <div className="mt-4 p-4 bg-gray-100 rounded overflow-auto" style={{ maxWidth: '100%', maxHeight: '50vh' }}>
                   <img 
                     src={screenshot} 
                     alt="Test screenshot" 
-                    className="mx-auto border border-gray-300" 
-                    style={{imageRendering: 'pixelated', width: '100px', height: '100px'}} 
+                    className="mx-auto border border-gray-300 block"
+                    style={{ imageRendering: 'pixelated', width: '100px', height: '100px', maxWidth: '100%', maxHeight: '40vh', objectFit: 'contain' }}
                   />
                   <p className="text-xs text-gray-500 mt-2">2x2 pixel test image (scaled up)</p>
                 </div>
@@ -978,34 +982,29 @@ const App: React.FC = () => {
                 <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded">
                   <p className="text-green-700 text-sm">✅ Screenshot validation passed</p>
                 </div>
-                <img 
-                  src={screenshot} 
-                  alt="Error screenshot" 
-                  className="max-w-full h-auto border border-gray-300 rounded"
-                  onError={(e) => {
-                    console.error('Image load error:', e);
-                    (e.target as HTMLImageElement).style.display = 'none';
-                    const errorDiv = document.createElement('div');
-                    errorDiv.className = 'text-center py-8';
-                    errorDiv.innerHTML = `
-                      <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
-                        ❌ Failed to display screenshot
-                      </div>
-                      <p class="text-gray-600">Screenshot data validation passed but image failed to load.</p>
-                    `;
-                    (e.target as HTMLImageElement).parentNode?.appendChild(errorDiv);
-                  }}
-                />
+                <div className="overflow-auto" style={{ maxWidth: '100%', maxHeight: '50vh' }}>
+                  <img 
+                    src={screenshot} 
+                    alt="Error screenshot" 
+                    className="max-w-full h-auto border border-gray-300 rounded block"
+                    style={{ maxWidth: '100%', maxHeight: '40vh', objectFit: 'contain' }}
+                    onError={(e) => {
+                      console.error('Image load error:', e);
+                      (e.target as HTMLImageElement).style.display = 'none';
+                      const errorDiv = document.createElement('div');
+                      errorDiv.className = 'text-center py-8';
+                      errorDiv.innerHTML = `
+                        <div class=\"bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4\">
+                          ❌ Failed to display screenshot
+                        </div>
+                        <p class=\"text-gray-600\">Screenshot data validation passed but image failed to load.</p>
+                      `;
+                      (e.target as HTMLImageElement).parentNode?.appendChild(errorDiv);
+                    }}
+                  />
+                </div>
               </div>
             )}
-          </div>
-          <div className="p-4 border-t">
-            <button
-              onClick={onClose}
-              className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
-            >
-              Close
-            </button>
           </div>
         </div>
       </div>
