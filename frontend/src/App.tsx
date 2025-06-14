@@ -19,7 +19,8 @@ interface StatusUpdate {
   upgradeId?: string;
   batchId?: string;
   status: 'starting' | 'navigating' | 'logging-in' | 'logged-in' | 'verification-required' | 
-          'navigating-package' | 'extracting-version-info' | 'awaiting-confirmation' | 'user-confirmed' |
+          'entering-verification' | 'verification-completed' | 'navigating-package' | 
+          'extracting-version-info' | 'awaiting-confirmation' | 'user-confirmed' |
           'finding-upgrade-button' | 'upgrading' | 'completed' | 'error';
   message: string;
   screenshot?: string;
@@ -39,6 +40,16 @@ interface VersionConfirmationUpdate {
     headerMessage: string;
     fullText: string;
   };
+}
+
+interface VerificationCodeUpdate {
+  type: 'verification-code-required';
+  orgId: string;
+  upgradeId: string;
+  batchId?: string;
+  status: 'verification-required';
+  message: string;
+  screenshot?: string;
 }
 
 interface BatchStatus {
@@ -170,6 +181,7 @@ const App: React.FC = () => {
   const [lastHeartbeat, setLastHeartbeat] = useState<number>(Date.now());
   const [activeBrowserCount] = useState<number>(0);
   const [versionConfirmations, setVersionConfirmations] = useState<Record<string, VersionConfirmationUpdate>>({});
+  const [verificationCodes, setVerificationCodes] = useState<Record<string, VerificationCodeUpdate>>({});
 
   // Refs
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -326,6 +338,14 @@ const App: React.FC = () => {
 
       if (data.type === 'version-confirmation-required') {
         setVersionConfirmations(prev => ({
+          ...prev,
+          [data.upgradeId]: data
+        }));
+        return;
+      }
+
+      if (data.type === 'verification-code-required') {
+        setVerificationCodes(prev => ({
           ...prev,
           [data.upgradeId]: data
         }));
@@ -507,6 +527,31 @@ const App: React.FC = () => {
     }
   }, [callApi, sessionId]);
 
+  // Verification code handling
+  const handleVerificationCode = useCallback(async (upgradeId: string, verificationCode: string) => {
+    try {
+      await callApi(`${API_URL}/api/submit-verification`, {
+        method: 'POST',
+        body: JSON.stringify({
+          sessionId: sessionId,
+          upgradeId: upgradeId,
+          verificationCode: verificationCode
+        }),
+      });
+      
+      // Remove from verification codes list
+      setVerificationCodes(prev => {
+        const updated = { ...prev };
+        delete updated[upgradeId];
+        return updated;
+      });
+      
+    } catch (error) {
+      console.error('Error sending verification code:', error);
+      alert(`Failed to send verification code: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }, [callApi, sessionId]);
+
   const handleSingleUpgrade = useCallback(async (): Promise<void> => {
     // Validation
     if (!selectedOrg) {
@@ -527,6 +572,7 @@ const App: React.FC = () => {
     setIsUpgrading(true);
     setStatus({});
     setVersionConfirmations({});
+    setVerificationCodes({});
     setApiError(null);
     startStatusUpdates();
     
@@ -577,6 +623,7 @@ const App: React.FC = () => {
     setIsUpgrading(true);
     setStatus({});
     setVersionConfirmations({});
+    setVerificationCodes({});
     setBatchStatus(null);
     setBatchProgress(null);
     setApiError(null);
@@ -629,6 +676,8 @@ const App: React.FC = () => {
       case 'upgrading': return 'text-blue-600';
       case 'timeout': return 'text-orange-600';
       case 'verification-required': return 'text-purple-600';
+      case 'entering-verification': return 'text-purple-600';
+      case 'verification-completed': return 'text-green-600';
       case 'awaiting-confirmation': return 'text-yellow-600';
       case 'user-confirmed': return 'text-green-600';
       case 'extracting-version-info': return 'text-blue-600';
@@ -646,6 +695,8 @@ const App: React.FC = () => {
       case 'upgrading': return '🔄';
       case 'timeout': return '⚠️';
       case 'verification-required': return '🔐';
+      case 'entering-verification': return '🔑';
+      case 'verification-completed': return '✅';
       case 'awaiting-confirmation': return '❓';
       case 'user-confirmed': return '👍';
       case 'extracting-version-info': return '📋';
@@ -801,6 +852,110 @@ const App: React.FC = () => {
               className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 font-medium"
             >
               ✅ Confirm & Proceed
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const VerificationCodeModal = ({ verification }: { verification: VerificationCodeUpdate }) => {
+    const [verificationCode, setVerificationCodeInput] = useState<string>('');
+    const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+    const org = orgs.find(o => o.id === verification.orgId);
+    
+    const handleSubmit = async () => {
+      if (!/^\d{6}$/.test(verificationCode)) {
+        alert('Please enter a valid 6-digit verification code');
+        return;
+      }
+      
+      setIsSubmitting(true);
+      try {
+        await handleVerificationCode(verification.upgradeId, verificationCode);
+      } finally {
+        setIsSubmitting(false);
+      }
+    };
+    
+    return (
+      <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4">
+        <div className="bg-white rounded-lg max-w-2xl w-full overflow-hidden" onClick={(e) => e.stopPropagation()}>
+          <div className="flex justify-between items-center p-6 border-b bg-purple-50">
+            <h3 className="text-xl font-semibold text-purple-900">Verification Code Required</h3>
+            <span className="text-sm text-purple-600">
+              {org?.name || verification.orgId}
+            </span>
+          </div>
+          
+          <div className="p-6">
+            <div className="mb-6">
+              <p className="text-gray-700 mb-4">
+                Salesforce has sent a verification code to your email address. 
+                Please check your email and enter the 6-digit code below.
+              </p>
+              
+              {verification.screenshot && (
+                <div className="mb-4">
+                  <p className="text-sm text-gray-600 mb-2">Screenshot of verification page:</p>
+                  <div className="border border-gray-300 rounded-lg overflow-hidden">
+                    <img 
+                      src={verification.screenshot} 
+                      alt="Verification page" 
+                      className="max-w-full h-auto"
+                      style={{ maxHeight: '300px', objectFit: 'contain' }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+            
+            <div className="mb-6">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Enter 6-digit verification code:
+              </label>
+              <input
+                type="text"
+                value={verificationCode}
+                onChange={(e) => {
+                  const value = e.target.value.replace(/\D/g, '').slice(0, 6);
+                  setVerificationCodeInput(value);
+                }}
+                placeholder="123456"
+                className="w-full px-4 py-3 text-center text-2xl font-mono border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                maxLength={6}
+                disabled={isSubmitting}
+                onKeyPress={(e) => {
+                  if (e.key === 'Enter' && verificationCode.length === 6) {
+                    handleSubmit();
+                  }
+                }}
+              />
+              <p className="text-xs text-gray-500 mt-2">
+                The code should be 6 digits sent to your registered email
+              </p>
+            </div>
+            
+            <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-6">
+              <h4 className="font-semibold text-yellow-900 mb-2">⏱️ Time Sensitive</h4>
+              <p className="text-sm text-yellow-800">
+                You have 2 minutes to enter the verification code before the process times out.
+                If you don't receive the code, check your spam folder or contact your Salesforce admin.
+              </p>
+            </div>
+          </div>
+          
+          <div className="flex justify-end items-center p-6 border-t bg-gray-50">
+            <button
+              onClick={handleSubmit}
+              disabled={verificationCode.length !== 6 || isSubmitting}
+              className={`px-6 py-2 rounded-lg font-medium ${
+                verificationCode.length === 6 && !isSubmitting
+                  ? 'bg-purple-600 text-white hover:bg-purple-700'
+                  : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+              }`}
+            >
+              {isSubmitting ? 'Submitting...' : 'Submit Code'}
             </button>
           </div>
         </div>
@@ -994,12 +1149,13 @@ const App: React.FC = () => {
                 <ul className="list-disc list-inside space-y-1 text-sm text-gray-600">
                   <li>Make sure your org credentials are configured in the backend</li>
                   <li>The automation runs in headless mode on Cloud Run</li>
-                  <li>If additional verification is required, the upgrade will fail and need manual intervention</li>
+                  <li>If verification is required, you'll be prompted to enter a code</li>
                   <li>Package ID must be exactly 15 characters starting with "04t"</li>
                   <li>Each upgrade typically takes 2-5 minutes to complete</li>
                   <li>Cloud Run has a 5-minute timeout limit per request</li>
                   <li>Screenshots are captured automatically on errors for debugging</li>
                   <li>You'll be asked to confirm package versions before proceeding</li>
+                  <li className="text-purple-600 font-medium">NEW: Email verification codes can now be entered directly!</li>
                 </ul>
               </div>
             </div>
@@ -1134,6 +1290,7 @@ const App: React.FC = () => {
                     <li>Screenshots are captured for failed upgrades</li>
                     <li>Maximum 50 organizations per batch for resource management</li>
                     <li>Version confirmation will be required for each org</li>
+                    <li className="text-purple-600 font-medium">NEW: Verification codes can be entered for each org!</li>
                   </ul>
                 </div>
               </div>
@@ -1368,8 +1525,18 @@ const App: React.FC = () => {
                       </p>
                     )}
                     {orgStatus.status === 'verification-required' && (
+                      <p className="text-xs text-purple-600 mt-2 font-medium">
+                        🔐 Check your email for a verification code and enter it in the popup
+                      </p>
+                    )}
+                    {orgStatus.status === 'entering-verification' && (
                       <p className="text-xs text-purple-600 mt-2">
-                        ⚠️ Manual action required: Please complete verification in the browser window
+                        🔑 Entering verification code...
+                      </p>
+                    )}
+                    {orgStatus.status === 'verification-completed' && (
+                      <p className="text-xs text-green-600 mt-2">
+                        ✅ Verification completed successfully!
                       </p>
                     )}
                     {orgStatus.status === 'error' && (
@@ -1410,7 +1577,7 @@ const App: React.FC = () => {
             <div className="flex items-center space-x-4">
               <span>Connection: {useSSE ? 'Server-Sent Events' : 'Polling'}</span>
               <span>Active Browsers: {activeBrowserCount || 0}</span>
-              <span>Version: 1.0.1</span>
+              <span>Version: 1.0.2</span>
             </div>
           </div>
         </div>
@@ -1420,6 +1587,14 @@ const App: React.FC = () => {
           <VersionConfirmationModal 
             key={confirmation.upgradeId} 
             confirmation={confirmation} 
+          />
+        ))}
+
+        {/* Verification Code Modals */}
+        {Object.values(verificationCodes).map((verification) => (
+          <VerificationCodeModal 
+            key={verification.upgradeId} 
+            verification={verification} 
           />
         ))}
 

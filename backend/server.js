@@ -408,7 +408,7 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy',
     timestamp: new Date().toISOString(),
-    version: '1.0.1',
+    version: '1.0.2',
     environment: config.node_env,
     memory: process.memoryUsage(),
     activeBrowsers: activeBrowserCount,
@@ -420,13 +420,14 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
   res.json({ 
     message: 'Salesforce Automation Backend',
-    version: '1.0.1',
+    version: '1.0.2',
     endpoints: [
       { path: '/health', method: 'GET', description: 'Health check' },
       { path: '/api/orgs', method: 'GET', description: 'List organizations' },
       { path: '/api/upgrade', method: 'POST', description: 'Single org upgrade' },
       { path: '/api/upgrade-batch', method: 'POST', description: 'Batch upgrade' },
       { path: '/api/confirm-upgrade', method: 'POST', description: 'Confirm upgrade version' },
+      { path: '/api/submit-verification', method: 'POST', description: 'Submit verification code' },
       { path: '/api/history', method: 'GET', description: 'Upgrade history' },
       { path: '/api/status/:sessionId', method: 'GET', description: 'Status updates (polling)' },
       { path: '/api/status-stream/:sessionId', method: 'GET', description: 'Status updates (SSE)' }
@@ -530,6 +531,47 @@ app.post('/api/confirm-upgrade', authenticate, asyncHandler(async (req, res) => 
     
   } catch (error) {
     console.error('Error handling confirmation:', error);
+    res.status(500).json({ 
+      error: 'Server error',
+      message: error.message
+    });
+  }
+}));
+
+// NEW: Verification code submission endpoint
+app.post('/api/submit-verification', authenticate, asyncHandler(async (req, res) => {
+  const { sessionId, upgradeId, verificationCode } = req.body;
+  
+  if (!sessionId || !upgradeId || !verificationCode) {
+    return res.status(400).json({ 
+      error: 'Validation error',
+      message: 'Missing required fields: sessionId, upgradeId, verificationCode'
+    });
+  }
+  
+  // Validate verification code format (typically 6 digits)
+  if (!/^\d{6}$/.test(verificationCode)) {
+    return res.status(400).json({ 
+      error: 'Validation error',
+      message: 'Verification code must be 6 digits'
+    });
+  }
+  
+  try {
+    // Store the verification code
+    const verificationKey = `${sessionId}-${upgradeId}-verification`;
+    statusStore.set(verificationKey, { 
+      verificationCode,
+      timestamp: Date.now()
+    });
+    
+    res.json({ 
+      message: 'Verification code submitted',
+      upgradeId
+    });
+    
+  } catch (error) {
+    console.error('Error handling verification:', error);
     res.status(500).json({ 
       error: 'Server error',
       message: error.message
@@ -827,7 +869,7 @@ async function runBatchUpgradeParallel(orgs, packageUrl, sessionId, batchId, max
   });
 }
 
-// Enhanced main upgrade function
+// Enhanced main upgrade function with verification code handling
 async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = null) {
   let browser;
   let context;
@@ -1016,12 +1058,60 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
       // Step 4: Check for verification
       const currentUrl = page.url();
       
-      if (currentUrl.includes('verify') || currentUrl.includes('challenge') || currentUrl.includes('2fa')) {
+      // Check for verification page with the specific header
+      const hasVerificationHeader = await page.evaluate(() => {
+        const header = document.querySelector('h2#header.mb12');
+        return header && header.textContent && header.textContent.includes('Verify Your Identity');
+      });
+      
+      if (currentUrl.includes('verify') || currentUrl.includes('challenge') || currentUrl.includes('2fa') || hasVerificationHeader) {
         // Capture screenshot of verification page
+        let verificationScreenshot = null;
         try {
-          failureScreenshot = await captureScreenshot(page, 'png');
+          verificationScreenshot = await captureScreenshot(page, 'png');
         } catch (e) {
           // Silent fail
+        }
+        
+        broadcastStatus(sessionId, { 
+          type: 'verification-code-required',
+          orgId: org.id,
+          upgradeId,
+          batchId,
+          status: 'verification-required', 
+          message: 'Verification code required. Please check your email and enter the 6-digit code.',
+          screenshot: verificationScreenshot
+        });
+        
+        // Wait for user to submit verification code (up to 2 minutes)
+        let verificationReceived = false;
+        let verificationCode = null;
+        
+        const verificationTimeout = setTimeout(() => {
+          if (!verificationReceived) {
+            // Timeout silently
+          }
+        }, VERIFICATION_TIMEOUT);
+        
+        // Check for verification code in a loop
+        for (let i = 0; i < 120; i++) { // 2 minutes max wait
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          
+          // Check if verification code was received
+          const verificationKey = `${sessionId}-${upgradeId}-verification`;
+          const verification = statusStore.get(verificationKey);
+          
+          if (verification) {
+            verificationReceived = true;
+            verificationCode = verification.verificationCode;
+            statusStore.delete(verificationKey); // Clean up
+            clearTimeout(verificationTimeout);
+            break;
+          }
+        }
+        
+        if (!verificationReceived) {
+          throw new Error('Verification code timeout - no code received within 2 minutes');
         }
         
         broadcastStatus(sessionId, { 
@@ -1029,12 +1119,60 @@ async function upgradePackage(org, packageUrl, sessionId, upgradeId, batchId = n
           orgId: org.id,
           upgradeId,
           batchId,
-          status: 'verification-required', 
-          message: 'Two-factor authentication required. Cannot proceed automatically.',
-          screenshot: failureScreenshot
+          status: 'entering-verification', 
+          message: 'Entering verification code...' 
         });
         
-        throw new Error('Manual verification required - two-factor authentication detected');
+        try {
+          // Find and fill the verification code input
+          await page.waitForSelector('input#emc', { timeout: 10000 });
+          await page.locator('input#emc').clear();
+          await page.locator('input#emc').fill(verificationCode);
+          
+          // Submit the verification form using the correct submit button
+          // Look for the Verify submit button with id="save"
+          const submitButton = await page.$('input#save[type="submit"][value="Verify"]');
+          if (submitButton) {
+            await submitButton.click();
+          } else {
+            // Fallback: try other selectors if the primary one isn't found
+            const alternativeSubmit = await page.$('input[type="submit"][value="Verify"], button[type="submit"]:has-text("Verify"), button:has-text("Verify")');
+            if (alternativeSubmit) {
+              await alternativeSubmit.click();
+            } else {
+              // Last resort: press Enter on the input field
+              await page.locator('input#emc').press('Enter');
+            }
+          }
+          
+          // Wait for navigation after verification
+          await page.waitForNavigation({ 
+            waitUntil: 'domcontentloaded',
+            timeout: 30000 
+          });
+          
+          // Additional wait to ensure page is stable
+          await page.waitForTimeout(3000);
+          
+          broadcastStatus(sessionId, { 
+            type: 'status',
+            orgId: org.id,
+            upgradeId,
+            batchId,
+            status: 'verification-completed', 
+            message: 'Verification completed successfully!' 
+          });
+          
+        } catch (error) {
+          // Capture screenshot on verification failure
+          try {
+            failureScreenshot = await captureScreenshot(page, 'png');
+          } catch (e) {
+            // Silent fail
+          }
+          
+          throw new Error(`Verification failed: ${error.message}`);
+        }
       }
       
       // Check if we successfully reached the main Salesforce interface
