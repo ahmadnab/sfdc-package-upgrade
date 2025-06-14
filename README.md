@@ -85,14 +85,6 @@ Visit [http://localhost:3000](http://localhost:3000).
 - **Batch Upgrade:** Select multiple orgs, set concurrency, and start.
 - **History:** Review past upgrades and their results.
 
-## Usage Screenshots
-
-| Single Upgrade Tab | Batch Upgrade Tab | History Tab |
-|:------------------:|:----------------:|:-----------:|
-| ![Single Upgrade](docs/screenshots/single-upgrade.png) | ![Batch Upgrade](docs/screenshots/batch-upgrade.png) | ![History](docs/screenshots/history.png) |
-
-> _Place your screenshots in `docs/screenshots/` or update the paths above. Filenames should match the UI tabs: `single-upgrade.png`, `batch-upgrade.png`, `history.png`._
-
 ## Deployment Instructions
 
 ### Docker (Recommended)
