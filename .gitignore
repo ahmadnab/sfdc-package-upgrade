@@ -137,3 +137,6 @@ dist
 
 # Backend org configuration
 backend/orgs-config.json
+
+# Ignore node_modules in backend
+backend/node_modules/
