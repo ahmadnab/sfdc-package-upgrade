@@ -1,150 +1,320 @@
 # Salesforce Package Upgrade Automation
 
-Automate Salesforce package upgrades across multiple orgs with a modern web UI and robust backend.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Node.js Version](https://img.shields.io/badge/node-%3E%3D16.0.0-brightgreen)](https://nodejs.org)
+[![React](https://img.shields.io/badge/react-%5E18.0.0-blue)](https://reactjs.org/)
+[![TypeScript](https://img.shields.io/badge/typescript-%5E4.9.0-blue)](https://www.typescriptlang.org/)
 
-## Features
+A powerful automation tool for upgrading Salesforce packages across multiple organizations with a user-friendly web interface. Built with React, TypeScript, Node.js, and Playwright.
 
-- **Single & Batch Upgrades:** Upgrade one or many orgs in parallel.
-- **Status Tracking:** Real-time progress via SSE or polling.
-- **Version & Verification Handling:** Supports version confirmation and 2FA code entry.
-- **History:** View upgrade logs and results.
-- **Secure:** API key authentication and CORS controls.
-- **Resource Management:** Limits concurrent browser sessions for stability.
 
-## Tech Stack
+## 🚀 Features
 
-- **Frontend:** React (TypeScript, Tailwind CSS)
-- **Backend:** Node.js (Express, Playwright)
-- **Communication:** REST API, Server-Sent Events (SSE)
-- **Persistence:** JSON files for org config and upgrade history
+- **Single Organization Upgrade**: Upgrade packages in individual Salesforce orgs
+- **Batch Processing**: Upgrade multiple organizations concurrently (up to 50 orgs)
+- **Version Confirmation**: Review and confirm package versions before installation
+- **2FA Support**: Handle Salesforce verification codes automatically
+- **Real-time Status Updates**: Monitor upgrade progress with Server-Sent Events (SSE)
+- **Error Screenshots**: Automatic screenshot capture on failures for debugging
+- **History Tracking**: Complete audit trail of all upgrade attempts
+- **Concurrent Processing**: Configurable concurrency for batch operations (1-4 simultaneous)
+- **Responsive UI**: Modern, mobile-friendly interface built with React and Tailwind CSS
 
-## Quick Start
+## 📋 Prerequisites
 
-### 1. Clone & Install
+- Node.js 16.0.0 or higher
+- npm or yarn
+- Salesforce org credentials with appropriate permissions
+- Google Chrome (for Playwright automation)
 
-```sh
+## 🛠️ Installation
+
+### 1. Clone the repository
+
+```bash
 git clone https://github.com/yourusername/salesforce-upgrade-automation.git
 cd salesforce-upgrade-automation
-cd backend && npm install
-cd ../frontend && npm install
 ```
 
-### 2. Configure Orgs
+### 2. Install Backend Dependencies
 
-Edit `backend/orgs-config.json`:
+```bash
+cd backend
+npm install
+```
+
+### 3. Install Frontend Dependencies
+
+```bash
+cd ../frontend
+npm install
+```
+
+### 4. Configure Organizations
+
+Create a `backend/orgs-config.json` file with your Salesforce organizations:
 
 ```json
 {
   "orgs": [
     {
       "id": "org1",
-      "name": "My Org",
-      "url": "https://login.salesforce.com",
-      "username": "user@example.com",
+      "name": "Production Org",
+      "url": "https://mycompany.my.salesforce.com",
+      "username": "admin@mycompany.com",
+      "password": "yourpassword"
+    },
+    {
+      "id": "org2",
+      "name": "Sandbox Org",
+      "url": "https://mycompany--sandbox.my.salesforce.com",
+      "username": "admin@mycompany.com.sandbox",
       "password": "yourpassword"
     }
-    // Add more orgs as needed
   ]
 }
 ```
 
-### 3. Set Environment Variables
+**⚠️ Security Note**: Never commit credentials to version control. Use environment variables for production.
 
-Create a `.env` file in `backend/` (optional):
+### 5. Environment Variables
 
-```
-API_KEY=your_api_key
+Create `.env` files in both frontend and backend directories:
+
+**backend/.env**
+```env
+PORT=8080
+NODE_ENV=development
+API_KEY=your-secret-api-key
 FRONTEND_URL=http://localhost:3000
+PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/path/to/chrome # Optional
 ```
 
-For the frontend, you can set the backend API URL (if not using the default):
-
-```
+**frontend/.env**
+```env
 REACT_APP_API_URL=http://localhost:8080
+REACT_APP_API_KEY=your-secret-api-key
 ```
 
-### 4. Run Backend
+## 🚀 Running the Application
 
-```sh
+### Development Mode
+
+1. **Start the Backend Server**:
+```bash
 cd backend
-npm start
+npm run dev
 ```
 
-### 5. Run Frontend
-
-```sh
+2. **Start the Frontend Development Server**:
+```bash
 cd frontend
 npm start
 ```
 
-Visit [http://localhost:3000](http://localhost:3000).
+3. Open your browser and navigate to `http://localhost:3000`
 
-## Usage
+### Production Mode
 
-- **Single Upgrade:** Select an org, enter a package ID (15 chars, starts with `04t`), and start.
-- **Batch Upgrade:** Select multiple orgs, set concurrency, and start.
-- **History:** Review past upgrades and their results.
-
-## Deployment Instructions
-
-### Docker (Recommended)
-
-1. Build and run the backend:
-
-```sh
-cd backend
-# Build Docker image
-docker build -t salesforce-upgrade-backend .
-# Run container
-# Replace <API_KEY> and <FRONTEND_URL> as needed
-
-docker run -d \
-  -p 8080:8080 \
-  -e API_KEY=your_api_key \
-  -e FRONTEND_URL=http://localhost:3000 \
-  -v $(pwd)/orgs-config.json:/app/orgs-config.json \
-  --name salesforce-upgrade-backend \
-  salesforce-upgrade-backend
-```
-
-> **Note:** The backend requires Playwright and Chromium dependencies. The provided Dockerfile installs these. If you encounter browser launch errors, ensure your host supports running headless Chromium (see [Playwright docs](https://playwright.dev/docs/installation)).
-
-2. Build and run the frontend:
-
-```sh
+1. **Build the Frontend**:
+```bash
 cd frontend
 npm run build
-# Serve with any static server, e.g.:
-npm install -g serve
-serve -s build -l 3000
 ```
 
-### Vercel/Netlify (Frontend Only)
+2. **Start the Backend Server**:
+```bash
+cd backend
+npm start
+```
 
-- Deploy the `frontend/` directory as a static site.
-- Set the backend API URL via the `REACT_APP_API_URL` environment variable.
+## 🐳 Docker Support
 
-### Cloud Run/Heroku (Backend)
+### Using Docker Compose
 
-- Deploy the backend Docker image or Node.js app as per your platform's instructions.
-- Set environment variables for `API_KEY` and `FRONTEND_URL`.
+```bash
+docker-compose up -d
+```
 
-## Troubleshooting
+### Building Individual Images
 
-- **Playwright/Chromium errors:** If you see browser launch errors in Docker or cloud, check that all dependencies for headless Chromium are installed. See [Playwright troubleshooting](https://playwright.dev/docs/faq#docker).
-- **CORS or API key errors:** Ensure your frontend and backend URLs and API keys match your environment variables.
+**Backend**:
+```bash
+cd backend
+docker build -t salesforce-automation-backend .
+docker run -p 8080:8080 --env-file .env salesforce-automation-backend
+```
 
-## Security
+**Frontend**:
+```bash
+cd frontend
+docker build -t salesforce-automation-frontend .
+docker run -p 3000:80 salesforce-automation-frontend
+```
 
-- API key required for all endpoints if set.
-- Passwords are never exposed to the frontend.
-- CORS is restricted to allowed origins.
+## 📖 Usage Guide
 
-## Development
+### Single Organization Upgrade
 
-- **Backend:** See `backend/server.js` for API and automation logic.
-- **Frontend:** See `frontend/src/App.tsx` for UI and API integration.
+1. Select an organization from the dropdown
+2. Enter the 15-character Salesforce package ID (e.g., `04tKb000000J8s9`)
+3. Click "Start Upgrade"
+4. Confirm the package version when prompted
+5. Enter verification code if 2FA is enabled
+6. Monitor progress in real-time
 
-## License
+### Batch Upgrade
 
-MIT
+1. Select multiple organizations (max 50)
+2. Enter the package ID
+3. Choose processing mode (1-4 concurrent)
+4. Click "Start Batch Upgrade"
+5. Confirm versions and handle verification for each org
+6. View progress and results in real-time
+
+### Viewing History
+
+1. Click the "History" tab
+2. View all past upgrade attempts
+3. Click "View Screenshot" for failed upgrades
+4. Load more results as needed
+
+## 🏗️ Architecture
+
+### Backend Stack
+- **Node.js + Express**: REST API server
+- **Playwright**: Browser automation for Salesforce interaction
+- **Server-Sent Events**: Real-time status updates
+- **File-based storage**: History persistence
+
+### Frontend Stack
+- **React 18**: UI framework
+- **TypeScript**: Type safety
+- **Tailwind CSS**: Styling
+- **Custom Hooks**: State management
+
+### Key Features
+- **Modular Design**: Clean separation of concerns
+- **Error Recovery**: Automatic retries for transient failures
+- **Resource Management**: Browser pool with limits
+- **Graceful Shutdown**: Proper cleanup on termination
+
+## 🔒 Security Considerations
+
+1. **API Authentication**: Use API keys for backend access
+2. **Credential Storage**: Store credentials securely (use environment variables or secrets management)
+3. **CORS Configuration**: Restrict allowed origins in production
+4. **HTTPS**: Use SSL/TLS in production environments
+5. **Input Validation**: Package IDs are validated before processing
+
+## 🧪 Testing
+
+### Running Tests
+
+```bash
+# Backend tests
+cd backend
+npm test
+
+# Frontend tests
+cd frontend
+npm test
+```
+
+### Manual Testing
+
+1. Use a Salesforce Developer Edition or Sandbox
+2. Test with known package IDs
+3. Verify error handling with invalid credentials
+4. Test concurrent operations with multiple orgs
+
+## 🚨 Troubleshooting
+
+### Common Issues
+
+1. **Browser Launch Failures**
+   - Ensure Chrome/Chromium is installed
+   - Check Playwright dependencies: `npx playwright install`
+   - Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` if needed
+
+2. **Connection Errors**
+   - Verify backend is running on correct port
+   - Check CORS settings match your frontend URL
+   - Ensure API keys match between frontend and backend
+
+3. **Login Failures**
+   - Verify credentials in `orgs-config.json`
+   - Check for IP restrictions in Salesforce
+   - Ensure user has necessary permissions
+
+4. **Timeout Errors**
+   - Cloud Run has a 5-minute timeout limit
+   - Large packages may exceed this limit
+   - Consider breaking into smaller batches
+
+### Debug Mode
+
+Enable debug logging:
+```bash
+DEBUG=* npm run dev
+```
+
+## 📦 Deployment
+
+### Cloud Run (Google Cloud)
+
+1. Build and push Docker image:
+```bash
+gcloud builds submit --tag gcr.io/PROJECT-ID/salesforce-automation
+```
+
+2. Deploy to Cloud Run:
+```bash
+gcloud run deploy --image gcr.io/PROJECT-ID/salesforce-automation --platform managed
+```
+
+### Heroku
+
+1. Create Heroku app:
+```bash
+heroku create your-app-name
+```
+
+2. Deploy:
+```bash
+git push heroku main
+```
+
+### Vercel (Frontend)
+
+1. Install Vercel CLI:
+```bash
+npm i -g vercel
+```
+
+2. Deploy frontend:
+```bash
+cd frontend
+vercel
+```
+
+## 🤝 Contributing
+
+We welcome contributions! Please follow these steps:
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+### Development Guidelines
+
+- Follow the existing code style
+- Add tests for new features
+- Update documentation as needed
+- Use conventional commits
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
