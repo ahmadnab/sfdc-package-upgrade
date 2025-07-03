@@ -1,8 +1,10 @@
-// App.tsx - Main application component with improved organization
+// frontend/src/App.tsx - Main application component with improved organization
 import React, { useState, useEffect, useCallback } from 'react';
+import { Auth } from './components/Auth';
 import { SingleUpgradeTab } from './components/SingleUpgradeTab';
 import { BatchUpgradeTab } from './components/BatchUpgradeTab';
 import { HistoryTab } from './components/HistoryTab';
+import { OrgManagementTab } from './components/OrgManagementTab';
 import { StatusPanel } from './components/StatusPanel';
 import { VersionConfirmationModal } from './components/modals/VersionConfirmationModal';
 import { VerificationCodeModal } from './components/modals/VerificationCodeModal';
@@ -31,6 +33,11 @@ import type {
 
 // Separate the main app logic into its own component
 const AppContent: React.FC = () => {
+  // Check authentication
+  const [isAuthenticated, setIsAuthenticated] = useState(() => {
+    return sessionStorage.getItem('sf-upgrade-auth') === 'authenticated';
+  });
+
   // State variables
   const [orgs, setOrgs] = useState<Org[]>([]);
   const [selectedOrg, setSelectedOrg] = useState<string>('');
@@ -41,7 +48,7 @@ const AppContent: React.FC = () => {
   const [batchStatus, setBatchStatus] = useState<BatchStatus | null>(null);
   const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null);
   const [isUpgrading, setIsUpgrading] = useState<boolean>(false);
-  const [activeTab, setActiveTab] = useState<TabType>('single');
+  const [activeTab, setActiveTab] = useState<TabType>('orgs');
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [historyTotal, setHistoryTotal] = useState<number>(0);
   const [historyOffset, setHistoryOffset] = useState<number>(0);
@@ -211,6 +218,60 @@ const AppContent: React.FC = () => {
     }
   }, [callApi, sessionId, showToast]);
 
+  // Org management handlers
+  const handleAddOrg = useCallback(async (orgData: Omit<Org, 'id'>) => {
+    try {
+      const response = await callApi(`${API_URL}/api/orgs`, {
+        method: 'POST',
+        body: JSON.stringify(orgData),
+      });
+      
+      // Refresh orgs list
+      await fetchOrgs();
+      return response;
+    } catch (error) {
+      throw error;
+    }
+  }, [callApi, fetchOrgs]);
+
+  const handleEditOrg = useCallback(async (orgId: string, orgData: Omit<Org, 'id'>) => {
+    try {
+      const response = await callApi(`${API_URL}/api/orgs/${orgId}`, {
+        method: 'PUT',
+        body: JSON.stringify(orgData),
+      });
+      
+      // Refresh orgs list
+      await fetchOrgs();
+      return response;
+    } catch (error) {
+      throw error;
+    }
+  }, [callApi, fetchOrgs]);
+
+  const handleDeleteOrg = useCallback(async (orgId: string) => {
+    try {
+      const response = await callApi(`${API_URL}/api/orgs/${orgId}`, {
+        method: 'DELETE',
+      });
+      
+      // Refresh orgs list
+      await fetchOrgs();
+      
+      // Clear selection if deleted org was selected
+      if (selectedOrg === orgId) {
+        setSelectedOrg('');
+      }
+      if (selectedOrgs.includes(orgId)) {
+        setSelectedOrgs(selectedOrgs.filter(id => id !== orgId));
+      }
+      
+      return response;
+    } catch (error) {
+      throw error;
+    }
+  }, [callApi, fetchOrgs, selectedOrg, selectedOrgs]);
+
   // Upgrade handlers
   const handleSingleUpgrade = useCallback(async (): Promise<void> => {
     if (!selectedOrg) {
@@ -319,6 +380,11 @@ const AppContent: React.FC = () => {
     };
   }, [stopStatusUpdates]);
 
+  // Show auth screen if not authenticated
+  if (!isAuthenticated) {
+    return <Auth onAuthenticated={() => setIsAuthenticated(true)} />;
+  }
+
   return (
     <div className="min-h-screen bg-gray-100 p-8">
       <div className="max-w-6xl mx-auto">
@@ -327,15 +393,19 @@ const AppContent: React.FC = () => {
             Salesforce Package Upgrade Automation
           </h1>
           
-          <div className="flex items-center space-x-2">
+          <div className="flex items-center space-x-4">
             <span className={`text-sm font-medium ${getConnectionStatusColor(connectionStatus)}`}>
               {getConnectionStatusIcon(connectionStatus)} {connectionStatus}
             </span>
-            {isUpgrading && (
-              <span className="text-xs text-gray-500">
-                (Session: {sessionId.split('-')[1]})
-              </span>
-            )}
+            <button
+              onClick={() => {
+                sessionStorage.removeItem('sf-upgrade-auth');
+                setIsAuthenticated(false);
+              }}
+              className="text-sm text-gray-600 hover:text-gray-800"
+            >
+              Logout
+            </button>
           </div>
         </div>
 
@@ -343,6 +413,16 @@ const AppContent: React.FC = () => {
 
         {/* Tab Navigation */}
         <div className="flex space-x-1 mb-6">
+          <button
+            onClick={() => setActiveTab('orgs')}
+            className={`px-4 py-2 rounded-t-lg font-medium transition-colors ${
+              activeTab === 'orgs'
+                ? 'bg-white text-blue-600 border-b-2 border-blue-600'
+                : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
+            }`}
+          >
+            Organizations ({orgs.length})
+          </button>
           <button
             onClick={() => setActiveTab('single')}
             className={`px-4 py-2 rounded-t-lg font-medium transition-colors ${
@@ -376,6 +456,17 @@ const AppContent: React.FC = () => {
         </div>
 
         {/* Tab Content */}
+        {activeTab === 'orgs' && (
+          <OrgManagementTab
+            orgs={orgs}
+            loading={loading}
+            onAddOrg={handleAddOrg}
+            onEditOrg={handleEditOrg}
+            onDeleteOrg={handleDeleteOrg}
+            onRefresh={fetchOrgs}
+          />
+        )}
+
         {activeTab === 'single' && (
           <SingleUpgradeTab
             orgs={orgs}

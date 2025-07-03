@@ -1,4 +1,4 @@
-// routes/index.js - API routes definition
+// backend/routes/index.js - API routes definition
 const { authenticate, validatePackageId, asyncHandler } = require('../middleware');
 const { statusManager } = require('../services/statusManager');
 const { historyManager } = require('../services/historyManager');
@@ -29,6 +29,9 @@ const setupRoutes = (app) => {
       endpoints: [
         { path: '/health', method: 'GET', description: 'Health check' },
         { path: '/api/orgs', method: 'GET', description: 'List organizations' },
+        { path: '/api/orgs', method: 'POST', description: 'Add organization' },
+        { path: '/api/orgs/:orgId', method: 'PUT', description: 'Update organization' },
+        { path: '/api/orgs/:orgId', method: 'DELETE', description: 'Delete organization' },
         { path: '/api/upgrade', method: 'POST', description: 'Single org upgrade' },
         { path: '/api/upgrade-batch', method: 'POST', description: 'Batch upgrade' },
         { path: '/api/confirm-upgrade', method: 'POST', description: 'Confirm upgrade version' },
@@ -118,6 +121,130 @@ const setupRoutes = (app) => {
       logger.error('Error loading orgs', error);
       res.status(500).json({ 
         error: 'Configuration error',
+        message: error.message
+      });
+    }
+  }));
+
+  // Add organization
+  app.post('/api/orgs', authenticate, asyncHandler(async (req, res) => {
+    const { name, url, username, password } = req.body;
+    
+    // Validation
+    if (!name || !url || !username || !password) {
+      return res.status(400).json({
+        error: 'Validation error',
+        message: 'All fields are required: name, url, username, password'
+      });
+    }
+    
+    if (!url.startsWith('https://')) {
+      return res.status(400).json({
+        error: 'Validation error',
+        message: 'URL must use HTTPS'
+      });
+    }
+    
+    if (!url.includes('.salesforce.com') && !url.includes('.force.com')) {
+      return res.status(400).json({
+        error: 'Validation error',
+        message: 'Invalid Salesforce URL'
+      });
+    }
+    
+    try {
+      const orgId = `org-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      await orgManager.addOrg({
+        id: orgId,
+        name,
+        url,
+        username,
+        password
+      });
+      
+      res.json({
+        message: 'Organization added successfully',
+        orgId
+      });
+    } catch (error) {
+      logger.error('Error adding org', error);
+      res.status(500).json({
+        error: 'Server error',
+        message: error.message
+      });
+    }
+  }));
+
+  // Update organization
+  app.put('/api/orgs/:orgId', authenticate, asyncHandler(async (req, res) => {
+    const { orgId } = req.params;
+    const { name, url, username, password } = req.body;
+    
+    // Validation
+    if (!name || !url || !username) {
+      return res.status(400).json({
+        error: 'Validation error',
+        message: 'Required fields: name, url, username'
+      });
+    }
+    
+    if (!url.startsWith('https://')) {
+      return res.status(400).json({
+        error: 'Validation error',
+        message: 'URL must use HTTPS'
+      });
+    }
+    
+    try {
+      const updated = await orgManager.updateOrg(orgId, {
+        name,
+        url,
+        username,
+        ...(password && { password }) // Only update password if provided
+      });
+      
+      if (!updated) {
+        return res.status(404).json({
+          error: 'Not found',
+          message: `Organization ${orgId} not found`
+        });
+      }
+      
+      res.json({
+        message: 'Organization updated successfully',
+        orgId
+      });
+    } catch (error) {
+      logger.error('Error updating org', error);
+      res.status(500).json({
+        error: 'Server error',
+        message: error.message
+      });
+    }
+  }));
+
+  // Delete organization
+  app.delete('/api/orgs/:orgId', authenticate, asyncHandler(async (req, res) => {
+    const { orgId } = req.params;
+    
+    try {
+      const deleted = await orgManager.deleteOrg(orgId);
+      
+      if (!deleted) {
+        return res.status(404).json({
+          error: 'Not found',
+          message: `Organization ${orgId} not found`
+        });
+      }
+      
+      res.json({
+        message: 'Organization deleted successfully',
+        orgId
+      });
+    } catch (error) {
+      logger.error('Error deleting org', error);
+      res.status(500).json({
+        error: 'Server error',
         message: error.message
       });
     }

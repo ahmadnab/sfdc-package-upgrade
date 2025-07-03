@@ -1,4 +1,4 @@
-// config/index.js - Centralized configuration
+// backend/config/index.js - Centralized configuration
 module.exports = {
   // Server settings
   PORT: process.env.PORT || 8080,
@@ -21,7 +21,8 @@ module.exports = {
   RETRY_DELAY: 2000,
   
   // Storage settings
-  HISTORY_LOG_PATH: '/tmp/upgrade-history.json',
+  HISTORY_LOG_PATH: process.env.HISTORY_LOG_PATH || '/tmp/upgrade-history.json',
+  ORGS_CONFIG_PATH: process.env.ORGS_CONFIG_PATH || '/tmp/orgs-config.json',
   MAX_HISTORY_ENTRIES: 100,
   MAX_STATUS_ENTRIES: 1000,
   MAX_REQUEST_SIZE: '50mb',

@@ -1,11 +1,14 @@
 // services/orgManager.js - Organization configuration management
 const fs = require('fs').promises;
+const path = require('path');
+const config = require('../config');
 const logger = require('../utils/logger');
 
 class OrgManager {
   constructor() {
     this.config = null;
     this.lastLoaded = null;
+    this.configPath = config.ORGS_CONFIG_PATH || path.join(process.cwd(), 'orgs-config.json');
   }
 
   async loadConfig() {
@@ -24,18 +27,53 @@ class OrgManager {
         return config;
       }
       
-      // Fallback to file
-      const data = await fs.readFile('orgs-config.json', 'utf8');
-      const config = JSON.parse(data);
-      this.validateConfig(config);
-      this.config = config;
-      this.lastLoaded = Date.now();
-      return config;
+      // Try to read from file
+      try {
+        const data = await fs.readFile(this.configPath, 'utf8');
+        const config = JSON.parse(data);
+        this.validateConfig(config);
+        this.config = config;
+        this.lastLoaded = Date.now();
+        return config;
+      } catch (error) {
+        // If file doesn't exist, create default config
+        if (error.code === 'ENOENT') {
+          const defaultConfig = { orgs: [] };
+          await this.saveConfig(defaultConfig);
+          this.config = defaultConfig;
+          this.lastLoaded = Date.now();
+          return defaultConfig;
+        }
+        throw error;
+      }
     } catch (error) {
       logger.error('Error loading org config', error);
       if (error instanceof SyntaxError) {
         throw new Error('Invalid JSON in org configuration');
       }
+      throw error;
+    }
+  }
+
+  async saveConfig(config) {
+    try {
+      // Don't save if using environment variable
+      if (process.env.ORGS_CONFIG) {
+        throw new Error('Cannot modify organizations when using environment variable configuration');
+      }
+      
+      // Ensure directory exists
+      const dir = path.dirname(this.configPath);
+      await fs.mkdir(dir, { recursive: true });
+      
+      // Write config
+      await fs.writeFile(this.configPath, JSON.stringify(config, null, 2));
+      
+      // Clear cache
+      this.config = null;
+      this.lastLoaded = null;
+    } catch (error) {
+      logger.error('Error saving org config', error);
       throw error;
     }
   }
@@ -85,6 +123,74 @@ class OrgManager {
   async getOrgCount() {
     const config = await this.loadConfig();
     return config.orgs.length;
+  }
+
+  async addOrg(orgData) {
+    const config = await this.loadConfig();
+    
+    // Check for duplicate names
+    if (config.orgs.some(o => o.name === orgData.name)) {
+      throw new Error(`Organization with name "${orgData.name}" already exists`);
+    }
+    
+    // Validate new org
+    this.validateConfig({ orgs: [orgData] });
+    
+    // Add to config
+    config.orgs.push(orgData);
+    
+    // Save
+    await this.saveConfig(config);
+    
+    logger.info(`Organization added: ${orgData.name} (${orgData.id})`);
+    return orgData;
+  }
+
+  async updateOrg(orgId, updates) {
+    const config = await this.loadConfig();
+    const index = config.orgs.findIndex(o => o.id === orgId);
+    
+    if (index === -1) {
+      return false;
+    }
+    
+    // Check for duplicate names (excluding current org)
+    if (updates.name && config.orgs.some((o, i) => i !== index && o.name === updates.name)) {
+      throw new Error(`Organization with name "${updates.name}" already exists`);
+    }
+    
+    // Merge updates
+    const updatedOrg = { ...config.orgs[index], ...updates };
+    
+    // Validate updated org
+    this.validateConfig({ orgs: [updatedOrg] });
+    
+    // Update in config
+    config.orgs[index] = updatedOrg;
+    
+    // Save
+    await this.saveConfig(config);
+    
+    logger.info(`Organization updated: ${updatedOrg.name} (${orgId})`);
+    return true;
+  }
+
+  async deleteOrg(orgId) {
+    const config = await this.loadConfig();
+    const initialLength = config.orgs.length;
+    
+    // Filter out the org
+    config.orgs = config.orgs.filter(o => o.id !== orgId);
+    
+    if (config.orgs.length === initialLength) {
+      return false; // Org not found
+    }
+    
+    // Save
+    await this.saveConfig(config);
+    
+    logger.info(`Organization deleted: ${orgId}`);
+    return true;
   }
 
   // Method to refresh configuration (useful for dynamic updates)

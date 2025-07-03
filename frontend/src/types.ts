@@ -1,4 +1,4 @@
-// types.ts - Centralized type definitions
+// frontend/src/types.ts - Centralized type definitions
 
 export interface Org {
   id: string;
@@ -101,7 +101,7 @@ export interface HistoryResponse {
   offset: number;
 }
 
-export type TabType = 'single' | 'batch' | 'history';
+export type TabType = 'orgs' | 'single' | 'batch' | 'history';
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
 
