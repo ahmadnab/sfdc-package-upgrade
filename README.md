@@ -7,7 +7,6 @@
 
 A powerful automation tool for upgrading Salesforce packages across multiple organizations with a modern web interface. Built with React, TypeScript, Node.js, and Playwright for reliable browser automation.
 
-![Salesforce Automation Dashboard](https://github.com/yourusername/salesforce-automation/raw/main/screenshots/dashboard.png)
 
 ## 🚀 Features
 
