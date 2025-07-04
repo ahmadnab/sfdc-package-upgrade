@@ -1,211 +1,273 @@
 # Salesforce Package Upgrade Automation
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Node.js Version](https://img.shields.io/badge/node-%3E%3D16.0.0-brightgreen)](https://nodejs.org)
-[![React](https://img.shields.io/badge/react-%5E18.0.0-blue)](https://reactjs.org/)
+[![Node.js Version](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen)](https://nodejs.org)
+[![React](https://img.shields.io/badge/react-%5E19.0.0-blue)](https://reactjs.org/)
 [![TypeScript](https://img.shields.io/badge/typescript-%5E4.9.0-blue)](https://www.typescriptlang.org/)
 
-A powerful automation tool for upgrading Salesforce packages across multiple organizations with a user-friendly web interface. Built with React, TypeScript, Node.js, and Playwright.
+A powerful automation tool for upgrading Salesforce packages across multiple organizations with a modern web interface. Built with React, TypeScript, Node.js, and Playwright for reliable browser automation.
 
+![Salesforce Automation Dashboard](https://github.com/yourusername/salesforce-automation/raw/main/screenshots/dashboard.png)
 
 ## 🚀 Features
 
-- **Single Organization Upgrade**: Upgrade packages in individual Salesforce orgs
-- **Batch Processing**: Upgrade multiple organizations concurrently (up to 50 orgs)
-- **Version Confirmation**: Review and confirm package versions before installation
-- **2FA Support**: Handle Salesforce verification codes automatically
-- **Real-time Status Updates**: Monitor upgrade progress with Server-Sent Events (SSE)
-- **Error Screenshots**: Automatic screenshot capture on failures for debugging
-- **History Tracking**: Complete audit trail of all upgrade attempts
-- **Concurrent Processing**: Configurable concurrency for batch operations (1-4 simultaneous)
-- **Responsive UI**: Modern, mobile-friendly interface built with React and Tailwind CSS
+### Core Functionality
+- **🔄 Single Organization Upgrade**: Upgrade packages in individual Salesforce orgs with real-time monitoring
+- **⚡ Batch Processing**: Upgrade multiple organizations concurrently (up to 50 orgs, 1-4 concurrent)
+- **📋 Version Confirmation**: Interactive review and confirmation of package versions before installation
+- **🔐 2FA Support**: Seamless handling of Salesforce verification codes via email
+- **📊 Real-time Status Updates**: Live progress monitoring with Server-Sent Events (SSE)
+- **📸 Error Screenshots**: Automatic screenshot capture on failures for easy debugging
+- **📈 History Tracking**: Complete audit trail of all upgrade attempts with search and filtering
+- **⚙️ Organization Management**: Add, edit, and manage Salesforce org credentials through the UI
+
+### Technical Features
+- **🌐 Modern React UI**: Responsive interface built with React 19 and Tailwind CSS
+- **🔧 TypeScript**: Full type safety throughout the application
+- **🤖 Browser Automation**: Reliable Playwright-based automation with retry logic
+- **🐳 Docker Support**: Containerized deployment with Docker and Docker Compose
+- **☁️ Cloud Ready**: Optimized for deployment on Google Cloud Run, Heroku, and other platforms
+- **🔒 Security**: API key authentication, input validation, and secure credential storage
 
 ## 📋 Prerequisites
 
-- Node.js 16.0.0 or higher
-- npm or yarn
-- Salesforce org credentials with appropriate permissions
-- Google Chrome (for Playwright automation)
+- **Node.js**: 18.0.0 or higher
+- **npm or yarn**: Latest version
+- **Google Chrome**: Required for Playwright automation
+- **Salesforce Orgs**: With appropriate package management permissions
 
-## 🛠️ Installation
+## 🛠️ Quick Start
 
-### 1. Clone the repository
+### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/yourusername/salesforce-upgrade-automation.git
-cd salesforce-upgrade-automation
+git clone https://github.com/yourusername/salesforce-package-upgrade-automation.git
+cd salesforce-package-upgrade-automation
 ```
 
-### 2. Install Backend Dependencies
+### 2. Install Dependencies
 
 ```bash
+# Install backend dependencies
 cd backend
 npm install
-```
 
-### 3. Install Frontend Dependencies
-
-```bash
+# Install frontend dependencies
 cd ../frontend
 npm install
 ```
 
-### 4. Configure Organizations
+### 3. Configure Environment Variables
 
-Create a `backend/orgs-config.json` file with your Salesforce organizations:
-
-```json
-{
-  "orgs": [
-    {
-      "id": "org1",
-      "name": "Production Org",
-      "url": "https://mycompany.my.salesforce.com",
-      "username": "admin@mycompany.com",
-      "password": "yourpassword"
-    },
-    {
-      "id": "org2",
-      "name": "Sandbox Org",
-      "url": "https://mycompany--sandbox.my.salesforce.com",
-      "username": "admin@mycompany.com.sandbox",
-      "password": "yourpassword"
-    }
-  ]
-}
-```
-
-**⚠️ Security Note**: Never commit credentials to version control. Use environment variables for production.
-
-### 5. Environment Variables
-
-Create `.env` files in both frontend and backend directories:
+Create `.env` files in both directories:
 
 **backend/.env**
 ```env
 PORT=8080
 NODE_ENV=development
-API_KEY=your-secret-api-key
+API_KEY=your-secret-api-key-here
 FRONTEND_URL=http://localhost:3000
-PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/path/to/chrome # Optional
+HISTORY_LOG_PATH=./data/upgrade-history.json
+ORGS_CONFIG_PATH=./data/orgs-config.json
 ```
 
 **frontend/.env**
 ```env
 REACT_APP_API_URL=http://localhost:8080
-REACT_APP_API_KEY=your-secret-api-key
+REACT_APP_API_KEY=your-secret-api-key-here
 ```
 
-## 🚀 Running the Application
+### 4. Start the Application
 
-### Development Mode
-
-1. **Start the Backend Server**:
 ```bash
+# Terminal 1: Start backend server
 cd backend
-npm run dev
-```
+npm start
 
-2. **Start the Frontend Development Server**:
-```bash
+# Terminal 2: Start frontend development server
 cd frontend
 npm start
 ```
 
-3. Open your browser and navigate to `http://localhost:3000`
+### 5. Access the Application
 
-### Production Mode
+Open your browser and navigate to `http://localhost:3000`
 
-1. **Build the Frontend**:
-```bash
-cd frontend
-npm run build
+Default passcode: `Ec@12345`
+
+## 🔧 Configuration
+
+### Organization Setup
+
+You can manage organizations through the web interface or by directly editing the configuration file:
+
+**backend/data/orgs-config.json**
+```json
+{
+  "orgs": [
+    {
+      "id": "org-prod-001",
+      "name": "Production Org",
+      "url": "https://mycompany.my.salesforce.com",
+      "username": "admin@mycompany.com",
+      "password": "your-secure-password"
+    },
+    {
+      "id": "org-sandbox-001", 
+      "name": "UAT Sandbox",
+      "url": "https://mycompany--uat.my.salesforce.com",
+      "username": "admin@mycompany.com.uat",
+      "password": "your-secure-password"
+    }
+  ]
+}
 ```
 
-2. **Start the Backend Server**:
-```bash
-cd backend
-npm start
-```
+### Environment Variables
 
-## 🐳 Docker Support
-
-### Using Docker Compose
-
-```bash
-docker-compose up -d
-```
-
-### Building Individual Images
-
-**Backend**:
-```bash
-cd backend
-docker build -t salesforce-automation-backend .
-docker run -p 8080:8080 --env-file .env salesforce-automation-backend
-```
-
-**Frontend**:
-```bash
-cd frontend
-docker build -t salesforce-automation-frontend .
-docker run -p 3000:80 salesforce-automation-frontend
-```
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PORT` | Backend server port | `8080` |
+| `API_KEY` | Authentication key | None (required) |
+| `FRONTEND_URL` | Frontend URL for CORS | `http://localhost:3000` |
+| `HISTORY_LOG_PATH` | Path to history file | `./data/upgrade-history.json` |
+| `ORGS_CONFIG_PATH` | Path to orgs config | `./data/orgs-config.json` |
+| `MAX_CONCURRENT_BROWSERS` | Max browser instances | `4` |
+| `VERIFICATION_TIMEOUT` | 2FA timeout (ms) | `120000` |
 
 ## 📖 Usage Guide
 
 ### Single Organization Upgrade
 
-1. Select an organization from the dropdown
-2. Enter the 15-character Salesforce package ID (e.g., `04tKb000000J8s9`)
-3. Click "Start Upgrade"
-4. Confirm the package version when prompted
-5. Enter verification code if 2FA is enabled
-6. Monitor progress in real-time
+1. **Navigate to Organizations Tab**: Add your Salesforce orgs with credentials
+2. **Go to Single Upgrade Tab**: Select an organization from the dropdown
+3. **Enter Package ID**: Input the 15-character Salesforce package ID (e.g., `04tKb000000J8s9`)
+4. **Start Upgrade**: Click "Start Upgrade" to begin the process
+5. **Version Confirmation**: Review and confirm the package version when prompted
+6. **Handle 2FA**: Enter verification code if two-factor authentication is required
+7. **Monitor Progress**: Watch real-time status updates as the upgrade proceeds
 
 ### Batch Upgrade
 
-1. Select multiple organizations (max 50)
-2. Enter the package ID
-3. Choose processing mode (1-4 concurrent)
-4. Click "Start Batch Upgrade"
-5. Confirm versions and handle verification for each org
-6. View progress and results in real-time
+1. **Select Organizations**: Choose multiple orgs (up to 50) for batch processing
+2. **Configure Concurrency**: Set processing mode (1-4 concurrent upgrades)
+3. **Enter Package ID**: Same package will be installed across all selected orgs
+4. **Start Batch**: Confirm the batch operation
+5. **Monitor Progress**: Track overall progress and individual org status
+6. **Review Results**: Check the completion summary with success/failure counts
 
-### Viewing History
+### Organization Management
 
-1. Click the "History" tab
-2. View all past upgrade attempts
-3. Click "View Screenshot" for failed upgrades
-4. Load more results as needed
+- **Add Org**: Click "Add Organization" to configure new Salesforce orgs
+- **Edit Org**: Modify existing org credentials and settings
+- **Delete Org**: Remove organizations (with confirmation prompt)
+- **Security**: Passwords are stored securely and never displayed after saving
 
-## 🏗️ Architecture
+### History & Monitoring
 
-### Backend Stack
-- **Node.js + Express**: REST API server
-- **Playwright**: Browser automation for Salesforce interaction
-- **Server-Sent Events**: Real-time status updates
-- **File-based storage**: History persistence
+- **View History**: Complete log of all upgrade attempts with timestamps
+- **Error Details**: View screenshots captured during failed upgrades
+- **Filter Results**: Search and filter by organization, status, or date
+- **Export Data**: Download history for reporting and analysis
 
-### Frontend Stack
-- **React 18**: UI framework
-- **TypeScript**: Type safety
-- **Tailwind CSS**: Styling
-- **Custom Hooks**: State management
+## 🐳 Docker Deployment
 
-### Key Features
-- **Modular Design**: Clean separation of concerns
-- **Error Recovery**: Automatic retries for transient failures
-- **Resource Management**: Browser pool with limits
-- **Graceful Shutdown**: Proper cleanup on termination
+### Using Docker Compose (Recommended)
+
+```bash
+# Clone and navigate to project
+git clone https://github.com/yourusername/salesforce-package-upgrade-automation.git
+cd salesforce-package-upgrade-automation
+
+# Configure environment variables
+cp backend/.env.example backend/.env
+cp frontend/.env.example frontend/.env
+
+# Start with Docker Compose
+docker-compose up -d
+```
+
+### Manual Docker Build
+
+```bash
+# Backend
+cd backend
+docker build -t sf-automation-backend .
+docker run -p 8080:8080 --env-file .env sf-automation-backend
+
+# Frontend  
+cd ../frontend
+docker build -t sf-automation-frontend .
+docker run -p 3000:80 sf-automation-frontend
+```
+
+## ☁️ Cloud Deployment
+
+### Google Cloud Run
+
+```bash
+# Build and push to Google Container Registry
+gcloud builds submit --tag gcr.io/PROJECT-ID/sf-automation
+
+# Deploy to Cloud Run
+gcloud run deploy sf-automation \
+  --image gcr.io/PROJECT-ID/sf-automation \
+  --platform managed \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --memory 2Gi \
+  --timeout 300s
+```
+
+### Heroku
+
+```bash
+# Create Heroku app
+heroku create your-sf-automation-app
+
+# Add environment variables
+heroku config:set API_KEY=your-secret-key
+heroku config:set NODE_ENV=production
+
+# Deploy
+git push heroku main
+```
+
+### Vercel (Frontend Only)
+
+```bash
+cd frontend
+npx vercel
+```
 
 ## 🔒 Security Considerations
 
-1. **API Authentication**: Use API keys for backend access
-2. **Credential Storage**: Store credentials securely (use environment variables or secrets management)
-3. **CORS Configuration**: Restrict allowed origins in production
-4. **HTTPS**: Use SSL/TLS in production environments
-5. **Input Validation**: Package IDs are validated before processing
+### Production Security Checklist
+
+- [ ] **Environment Variables**: Store all secrets in environment variables, never in code
+- [ ] **API Keys**: Use strong, unique API keys for authentication
+- [ ] **HTTPS**: Deploy with SSL/TLS certificates in production
+- [ ] **CORS**: Configure allowed origins to match your domain
+- [ ] **Credentials**: Use dedicated integration users with minimal required permissions
+- [ ] **Network**: Restrict access using firewalls or VPN when possible
+- [ ] **Monitoring**: Enable logging and monitoring for security events
+
+### Credential Management
+
+```bash
+# Example: Using environment variables for org config
+export ORGS_CONFIG='{
+  "orgs": [
+    {
+      "id": "prod",
+      "name": "Production",
+      "url": "https://company.my.salesforce.com",
+      "username": "integration@company.com",
+      "password": "'"$SF_PROD_PASSWORD"'"
+    }
+  ]
+}'
+```
 
 ## 🧪 Testing
 
@@ -216,105 +278,137 @@ docker run -p 3000:80 salesforce-automation-frontend
 cd backend
 npm test
 
-# Frontend tests
+# Frontend tests  
 cd frontend
 npm test
+
+# End-to-end tests
+npm run test:e2e
 ```
 
-### Manual Testing
+### Manual Testing Checklist
 
-1. Use a Salesforce Developer Edition or Sandbox
-2. Test with known package IDs
-3. Verify error handling with invalid credentials
-4. Test concurrent operations with multiple orgs
+- [ ] Test with Salesforce Developer Edition or Sandbox
+- [ ] Verify error handling with invalid credentials
+- [ ] Test 2FA flow with verification codes
+- [ ] Validate concurrent batch operations
+- [ ] Check screenshot capture on failures
+- [ ] Verify history persistence and retrieval
 
 ## 🚨 Troubleshooting
 
 ### Common Issues
 
-1. **Browser Launch Failures**
-   - Ensure Chrome/Chromium is installed
-   - Check Playwright dependencies: `npx playwright install`
-   - Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` if needed
+**🔴 Browser Launch Failures**
+```bash
+# Install Playwright browsers
+npx playwright install chromium
 
-2. **Connection Errors**
-   - Verify backend is running on correct port
-   - Check CORS settings match your frontend URL
-   - Ensure API keys match between frontend and backend
+# Set custom Chrome path if needed
+export PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/google-chrome
+```
 
-3. **Login Failures**
-   - Verify credentials in `orgs-config.json`
-   - Check for IP restrictions in Salesforce
-   - Ensure user has necessary permissions
+**🔴 Connection Errors**
+- Verify backend is running on correct port
+- Check CORS configuration matches frontend URL
+- Ensure API keys match between frontend and backend
 
-4. **Timeout Errors**
-   - Cloud Run has a 5-minute timeout limit
-   - Large packages may exceed this limit
-   - Consider breaking into smaller batches
+**🔴 Salesforce Login Issues**
+- Verify credentials in organization configuration
+- Check for IP restrictions in Salesforce org settings
+- Ensure user has Package Manager permissions
+
+**🔴 Cloud Run Timeouts**
+- Cloud Run has 5-minute request timeout
+- Use batch processing for large package deployments
+- Consider breaking large operations into smaller chunks
 
 ### Debug Mode
 
-Enable debug logging:
+Enable detailed logging:
+
 ```bash
+# Backend debug mode
 DEBUG=* npm run dev
+
+# Frontend console logging
+REACT_APP_DEBUG=true npm start
 ```
 
-## 📦 Deployment
+### Log Locations
 
-### Cloud Run (Google Cloud)
+- **Backend Logs**: Console output or configured log file
+- **History Data**: `backend/data/upgrade-history.json`
+- **Organization Config**: `backend/data/orgs-config.json`
+- **Browser Screenshots**: Embedded in error responses (base64)
 
-1. Build and push Docker image:
-```bash
-gcloud builds submit --tag gcr.io/PROJECT-ID/salesforce-automation
+## 🏗️ Architecture
+
+### System Overview
+
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│                 │    │                 │    │                 │
+│   React Frontend│◄───┤   Node.js API   │◄───┤   Playwright    │
+│   (TypeScript)  │    │   (Express)     │    │   (Browser)     │
+│                 │    │                 │    │                 │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+         │                       │                       │
+         │                       │                       │
+         ▼                       ▼                       ▼
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│                 │    │                 │    │                 │
+│   Tailwind CSS  │    │   File Storage  │    │   Salesforce    │
+│   Server-Sent   │    │   JSON Config   │    │   Organizations │
+│   Events (SSE)  │    │   History Logs  │    │                 │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
 ```
 
-2. Deploy to Cloud Run:
-```bash
-gcloud run deploy --image gcr.io/PROJECT-ID/salesforce-automation --platform managed
-```
+### Key Components
 
-### Heroku
-
-1. Create Heroku app:
-```bash
-heroku create your-app-name
-```
-
-2. Deploy:
-```bash
-git push heroku main
-```
-
-### Vercel (Frontend)
-
-1. Install Vercel CLI:
-```bash
-npm i -g vercel
-```
-
-2. Deploy frontend:
-```bash
-cd frontend
-vercel
-```
+- **Frontend**: React SPA with TypeScript, real-time updates via SSE
+- **Backend**: Express.js API with Playwright automation engine  
+- **Storage**: File-based JSON for configuration and history
+- **Automation**: Headless Chrome with Playwright for Salesforce interaction
+- **Security**: API key authentication, input validation, CORS protection
 
 ## 🤝 Contributing
 
-We welcome contributions! Please follow these steps:
+We welcome contributions! Please follow these guidelines:
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+### Development Setup
 
-### Development Guidelines
+1. **Fork the repository**
+2. **Create a feature branch**: `git checkout -b feature/amazing-feature`
+3. **Install dependencies**: `npm install` in both `backend/` and `frontend/`
+4. **Make changes**: Follow existing code style and patterns
+5. **Add tests**: Include unit tests for new functionality
+6. **Update docs**: Update README if needed
+7. **Submit PR**: Create a pull request with detailed description
 
-- Follow the existing code style
-- Add tests for new features
-- Update documentation as needed
-- Use conventional commits
+### Code Standards
+
+- **TypeScript**: Use strict type checking
+- **ESLint**: Follow configured linting rules
+- **Prettier**: Format code consistently
+- **Conventional Commits**: Use semantic commit messages
+- **Testing**: Maintain test coverage above 80%
+
+### Issue Templates
+
+When reporting bugs or requesting features, please include:
+
+- **Environment**: OS, Node.js version, browser
+- **Steps to reproduce**: Detailed reproduction steps
+- **Expected behavior**: What should happen
+- **Actual behavior**: What actually happens
+- **Screenshots**: If applicable
+- **Logs**: Relevant error messages or logs
 
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+---
+
+**⭐ If this project helps you, please consider giving it a star on GitHub!**
