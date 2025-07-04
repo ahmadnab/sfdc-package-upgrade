@@ -1,14 +1,14 @@
-// services/orgManager.js - Organization configuration management
-const fs = require('fs').promises;
-const path = require('path');
+// services/orgManager.js - Organization configuration with GCS support
 const config = require('../config');
 const logger = require('../utils/logger');
+const { gcsStorageManager } = require('./gcsStorageManager');
 
 class OrgManager {
   constructor() {
     this.config = null;
     this.lastLoaded = null;
-    this.configPath = config.ORGS_CONFIG_PATH || path.join(process.cwd(), 'orgs-config.json');
+    this.configPath = config.ORGS_CONFIG_PATH;
+    this.storage = gcsStorageManager;
   }
 
   async loadConfig() {
@@ -27,9 +27,9 @@ class OrgManager {
         return config;
       }
       
-      // Try to read from file
+      // Try to read from storage (GCS or local)
       try {
-        const data = await fs.readFile(this.configPath, 'utf8');
+        const data = await this.storage.readFile(this.configPath);
         const config = JSON.parse(data);
         this.validateConfig(config);
         this.config = config;
@@ -51,7 +51,8 @@ class OrgManager {
       if (error instanceof SyntaxError) {
         throw new Error('Invalid JSON in org configuration');
       }
-      throw error;
+      // Return empty config as fallback
+      return { orgs: [] };
     }
   }
 
@@ -62,16 +63,17 @@ class OrgManager {
         throw new Error('Cannot modify organizations when using environment variable configuration');
       }
       
-      // Ensure directory exists
-      const dir = path.dirname(this.configPath);
-      await fs.mkdir(dir, { recursive: true });
-      
       // Write config
-      await fs.writeFile(this.configPath, JSON.stringify(config, null, 2));
+      await this.storage.writeFile(
+        this.configPath, 
+        JSON.stringify(config, null, 2)
+      );
       
       // Clear cache
       this.config = null;
       this.lastLoaded = null;
+      
+      logger.debug('Organization config saved successfully');
     } catch (error) {
       logger.error('Error saving org config', error);
       throw error;
@@ -198,6 +200,18 @@ class OrgManager {
     this.config = null;
     this.lastLoaded = null;
     return this.loadConfig();
+  }
+
+  // Create backup before major operations
+  async createBackup() {
+    try {
+      if (this.storage.createBackup) {
+        return await this.storage.createBackup();
+      }
+    } catch (error) {
+      logger.error('Error creating backup:', error);
+    }
+    return null;
   }
 }
 

@@ -1,17 +1,17 @@
-// services/historyManager.js - History persistence and retrieval
-const fs = require('fs').promises;
-const path = require('path');
+// services/historyManager.js - History persistence with GCS support
 const config = require('../config');
 const logger = require('../utils/logger');
+const { gcsStorageManager } = require('./gcsStorageManager');
 
 class HistoryManager {
   constructor() {
     this.historyPath = config.HISTORY_LOG_PATH;
+    this.storage = gcsStorageManager;
   }
 
   async loadHistory() {
     try {
-      const data = await fs.readFile(this.historyPath, 'utf8');
+      const data = await this.storage.readFile(this.historyPath);
       const history = JSON.parse(data);
       // Ensure upgrades array exists
       if (!history.upgrades) {
@@ -19,22 +19,27 @@ class HistoryManager {
       }
       return history;
     } catch (error) {
+      if (error.code === 'ENOENT') {
+        return { upgrades: [] };
+      }
+      logger.error('Error loading history:', error);
       return { upgrades: [] };
     }
   }
 
   async saveHistory(history) {
     try {
-      // Ensure directory exists
-      const dir = path.dirname(this.historyPath);
-      await fs.mkdir(dir, { recursive: true });
-      
       // Limit history size
       if (history.upgrades && history.upgrades.length > config.MAX_HISTORY_ENTRIES) {
         history.upgrades = history.upgrades.slice(0, config.MAX_HISTORY_ENTRIES);
       }
       
-      await fs.writeFile(this.historyPath, JSON.stringify(history, null, 2));
+      await this.storage.writeFile(
+        this.historyPath, 
+        JSON.stringify(history, null, 2)
+      );
+      
+      logger.debug('History saved successfully');
     } catch (error) {
       logger.error('Error saving history', error);
       // Don't throw - history is not critical
@@ -92,7 +97,12 @@ class HistoryManager {
       };
     } catch (error) {
       logger.error('Error fetching history', error);
-      throw error;
+      return {
+        upgrades: [],
+        total: 0,
+        limit: limit,
+        offset: offset
+      };
     }
   }
 
